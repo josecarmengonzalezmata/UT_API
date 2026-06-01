@@ -55,6 +55,101 @@ final class Api
             return;
         }
 
+        if ($first === 'calendar') {
+            if ($method === 'GET' && ($segments[1] ?? '') === 'file') {
+                $this->streamCurrentCalendarFile();
+            }
+
+            if ($method === 'GET') {
+                Response::json(['data' => $this->getCurrentCalendarMeta()]);
+            }
+
+            $user = $this->requireUser();
+            $this->handleCalendar($method, $segments, $user);
+            return;
+        }
+
+        if ($first === 'groups') {
+            // public listing
+            if ($method === 'GET' && count($segments) === 1) {
+                Response::json(['data' => $this->loadGroups()]);
+                return;
+            }
+
+            // allow fetching a single group publicly
+            if ($method === 'GET' && isset($segments[1]) && is_numeric($segments[1])) {
+                $id = (int) $segments[1];
+                $groups = $this->loadGroups();
+                foreach ($groups as $g) {
+                    if ((int)$g['id'] === $id) {
+                        Response::json(['data' => $g]);
+                        return;
+                    }
+                }
+                Response::error('Not found', 404);
+            }
+
+            // mutations require an authenticated user with admin role
+            $user = $this->requireUser();
+            $this->requireAnyRole($user, ['administrador']);
+
+            // create
+            if ($method === 'POST' && count($segments) === 1) {
+                $data = $this->body();
+                $this->validateRequired($data, ['careerCode', 'plan', 'cuatrimestre', 'groupNumber']);
+                $groups = $this->loadGroups();
+                $id = (int) round(microtime(true) * 1000);
+                $g = [
+                    'id' => $id,
+                    'careerCode' => strtoupper((string)$data['careerCode']),
+                    'plan' => (string)$data['plan'],
+                    'cuatrimestre' => (int)$data['cuatrimestre'],
+                    'groupNumber' => (int)$data['groupNumber'],
+                    'name' => strtoupper((string)$data['careerCode']) . $data['cuatrimestre'] . '-' . $data['groupNumber'],
+                ];
+                array_unshift($groups, $g);
+                $this->saveGroups($groups);
+                Response::json(['data' => $g], 201);
+            }
+
+            $id = isset($segments[1]) ? (int)$segments[1] : 0;
+            if ($id <= 0) {
+                Response::error('Invalid group id', 422);
+            }
+
+            // update
+            if ($method === 'PATCH' || $method === 'PUT') {
+                $data = $this->body();
+                $groups = $this->loadGroups();
+                $found = false;
+                foreach ($groups as &$g) {
+                    if ((int)$g['id'] === $id) {
+                        $found = true;
+                        if (isset($data['careerCode'])) $g['careerCode'] = strtoupper((string)$data['careerCode']);
+                        if (isset($data['plan'])) $g['plan'] = (string)$data['plan'];
+                        if (isset($data['cuatrimestre'])) $g['cuatrimestre'] = (int)$data['cuatrimestre'];
+                        if (isset($data['groupNumber'])) $g['groupNumber'] = (int)$data['groupNumber'];
+                        $g['name'] = $g['careerCode'] . $g['cuatrimestre'] . '-' . $g['groupNumber'];
+                        break;
+                    }
+                }
+                unset($g);
+                if (!$found) Response::error('Not found', 404);
+                $this->saveGroups($groups);
+                foreach ($groups as $g) if ((int)$g['id'] === $id) Response::json(['data' => $g]);
+            }
+
+            // delete
+            if ($method === 'DELETE') {
+                $groups = $this->loadGroups();
+                $next = array_values(array_filter($groups, static fn($g) => (int)$g['id'] !== $id));
+                $this->saveGroups($next);
+                Response::json(['data' => null]);
+            }
+
+            Response::error('Method not allowed', 405);
+        }
+
         $user = $this->requireUser();
 
         if ($first === 'dashboard' && ($segments[1] ?? '') === 'stats' && $method === 'GET') {
@@ -117,48 +212,6 @@ final class Api
         if ($method === 'POST' && $action === 'reset-password') {
             $this->resetPassword();
             return;
-        }
-
-        Response::error('Not found', 404);
-    }
-
-    private function handleForms(string $method, array $segments, array $user): void
-    {
-        $this->requireAnyRole($user, ['administrador']);
-
-        $pdo = Database::pdo();
-
-        if ($method === 'GET' && count($segments) === 1) {
-            $statement = $pdo->query('SELECT * FROM forms ORDER BY section, title');
-            Response::json(['data' => $statement->fetchAll()]);
-        }
-
-        $id = isset($segments[1]) ? (int) $segments[1] : 0;
-        if ($id <= 0) {
-            Response::error('Invalid form id', 422);
-        }
-
-        if ($method === 'GET') {
-            $statement = $pdo->prepare('SELECT * FROM forms WHERE id = ? LIMIT 1');
-            $statement->execute([$id]);
-            $form = $statement->fetch();
-            if (!$form) {
-                Response::error('Form not found', 404);
-            }
-            Response::json(['data' => $form]);
-        }
-
-        if ($method === 'PUT' || $method === 'PATCH') {
-            $data = $this->body();
-            $statement = $pdo->prepare('UPDATE forms SET title = COALESCE(:title, title), section = COALESCE(:section, section), description = COALESCE(:description, description), is_active = COALESCE(:is_active, is_active) WHERE id = :id');
-            $statement->execute([
-                'id' => $id,
-                'title' => $data['title'] ?? null,
-                'section' => $data['section'] ?? null,
-                'description' => $data['description'] ?? null,
-                'is_active' => array_key_exists('is_active', $data) ? (int) (bool) $data['is_active'] : null,
-            ]);
-            Response::json(['data' => $this->fetchOne('SELECT * FROM forms WHERE id = ?', [$id])]);
         }
 
         Response::error('Method not allowed', 405);
@@ -305,8 +358,34 @@ final class Api
                 Response::error('User not found', 404);
             }
 
+            $roles = null;
+            if (array_key_exists('roles', $data)) {
+                $roles = array_values(array_filter(array_map(
+                    static fn (mixed $role): string => trim((string) $role),
+                    (array) ($data['roles'] ?? [])
+                )));
+
+                if ($roles === []) {
+                    Response::error('At least one role is required', 422);
+                }
+            }
+
+            if ($id === (int) $user['id']) {
+                if (array_key_exists('is_active', $data) && !(int) $data['is_active']) {
+                    Response::json(['error' => 'No puedes desactivar tu propia cuenta'], 403);
+                }
+                if (array_key_exists('roles', $data)) {
+                    Response::json(['error' => 'No puedes cambiar tus propios roles desde aquí'], 403);
+                }
+            }
+
             $pdo->beginTransaction();
             try {
+                $passwordHash = null;
+                if (array_key_exists('password', $data) && $data['password'] !== null && $data['password'] !== '') {
+                    $passwordHash = password_hash((string) $data['password'], PASSWORD_DEFAULT);
+                }
+
                 $statement = $pdo->prepare('UPDATE users SET full_name = ?, email = ?, phone = ?, area = ?, avatar_url = ?, is_active = ?, password_hash = COALESCE(?, password_hash) WHERE id = ?');
                 $statement->execute([
                     $data['full_name'] ?? $current['full_name'],
@@ -315,12 +394,12 @@ final class Api
                     array_key_exists('area', $data) ? $data['area'] : $current['area'],
                     array_key_exists('avatar_url', $data) ? $data['avatar_url'] : $current['avatar_url'],
                     array_key_exists('is_active', $data) ? (int) (bool) $data['is_active'] : (int) $current['is_active'],
-                    !empty($data['password']) ? password_hash((string) $data['password'], PASSWORD_DEFAULT) : null,
+                    $passwordHash,
                     $id,
                 ]);
 
-                if (array_key_exists('roles', $data)) {
-                    $this->syncUserRoles($id, (array) $data['roles']);
+                if ($roles !== null) {
+                    $this->syncUserRoles($id, $roles);
                 }
 
                 $pdo->commit();
@@ -333,6 +412,10 @@ final class Api
         }
 
         if ($method === 'DELETE') {
+            if ($id === (int) $user['id']) {
+                Response::json(['error' => 'No puedes desactivar tu propia cuenta'], 403);
+            }
+
             $pdo->prepare('UPDATE users SET is_active = 0 WHERE id = ?')->execute([$id]);
             Response::json(['message' => 'User deactivated']);
         }
@@ -504,35 +587,56 @@ final class Api
     private function handleConversations(string $method, array $segments, array $user): void
     {
         $pdo = Database::pdo();
+        $currentUserId = (int) $user['id'];
 
         if ($method === 'GET' && count($segments) === 1) {
-            $rows = $this->fetchAll('SELECT c.*, COUNT(cp.user_id) AS participants FROM conversations c LEFT JOIN conversation_participants cp ON cp.conversation_id = c.id GROUP BY c.id ORDER BY c.updated_at DESC');
+            $rows = $this->loadUserConversations($currentUserId);
             Response::json(['data' => $rows]);
         }
 
         if ($method === 'POST' && count($segments) === 1) {
             $data = $this->body();
-            $pdo->beginTransaction();
-            try {
-                $pdo->exec('INSERT INTO conversations () VALUES ()');
-                $conversationId = (int) $pdo->lastInsertId();
+            $participants = array_filter(array_map('intval', (array) ($data['participant_user_ids'] ?? [])));
 
-                $participants = array_unique(array_filter(array_map('intval', (array) ($data['participants'] ?? []))));
-                $participants[] = (int) $user['id'];
-                $participants = array_values(array_unique($participants));
-
-                $insert = $pdo->prepare('INSERT INTO conversation_participants (conversation_id, user_id, unread_count, last_read_at) VALUES (?, ?, 0, NULL)');
-                foreach ($participants as $participantId) {
-                    $insert->execute([$conversationId, $participantId]);
-                }
-
-                $pdo->commit();
-            } catch (\Throwable $exception) {
-                $pdo->rollBack();
-                throw $exception;
+            if (isset($data['recipient_user_id'])) {
+                $participants[] = (int) $data['recipient_user_id'];
             }
 
-            Response::json(['data' => $this->fetchOne('SELECT * FROM conversations WHERE id = LAST_INSERT_ID()')], 201);
+            $participants[] = $currentUserId;
+            $participants = array_values(array_unique(array_filter($participants)));
+
+            if (count($participants) !== 2) {
+                Response::error('Solo se permiten conversaciones entre dos participantes', 422);
+            }
+
+            $users = $this->fetchAll(
+                'SELECT u.id, u.full_name, r.code AS role_code FROM users u LEFT JOIN user_roles ur ON ur.user_id = u.id LEFT JOIN roles r ON r.id = ur.role_id WHERE u.id IN (?, ?)',
+                [$participants[0], $participants[1]]
+            );
+
+            if (count($users) !== 2) {
+                Response::error('Usuarios inválidos para la conversación', 422);
+            }
+
+            $roleA = $users[0]['role_code'] ?? 'docente';
+            $roleB = $users[1]['role_code'] ?? 'docente';
+            if ($roleA === $roleB) {
+                Response::error('Las conversaciones solo están permitidas entre Administrador y Docente', 422);
+            }
+
+            $pair = [$roleA, $roleB];
+            sort($pair);
+            if ($pair !== ['administrador', 'docente']) {
+                Response::error('Pareja de roles no permitida para conversaciones', 422);
+            }
+
+            $existingId = $this->findDirectConversationId($participants[0], $participants[1]);
+            if ($existingId !== null) {
+                Response::json(['data' => $this->formatConversation($existingId, $currentUserId)]);
+            }
+
+            $conversationId = $this->createDirectConversation($participants[0], $participants[1]);
+            Response::json(['data' => $this->formatConversation($conversationId, $currentUserId)], 201);
         }
 
         $conversationId = isset($segments[1]) ? (int) $segments[1] : 0;
@@ -541,26 +645,182 @@ final class Api
         }
 
         if (($segments[2] ?? '') === 'messages' && $method === 'GET') {
-            Response::json(['data' => $this->fetchAll('SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at ASC', [$conversationId])]);
+            $this->requireConversationAccess($conversationId, $currentUserId);
+            Response::json(['data' => $this->fetchConversationMessages($conversationId, $currentUserId)]);
         }
 
         if (($segments[2] ?? '') === 'messages' && $method === 'POST') {
             $data = $this->body();
             $this->validateRequired($data, ['body']);
+            $this->requireConversationAccess($conversationId, $currentUserId);
             $statement = $pdo->prepare('INSERT INTO messages (conversation_id, sender_user_id, body, reply_to_message_id) VALUES (?, ?, ?, ?)');
-            $statement->execute([$conversationId, $user['id'], $data['body'], $data['reply_to_message_id'] ?? null]);
+            $statement->execute([$conversationId, $currentUserId, $data['body'], $data['reply_to_message_id'] ?? null]);
 
             $pdo->prepare('UPDATE conversations SET updated_at = NOW() WHERE id = ?')->execute([$conversationId]);
+            $pdo->prepare('UPDATE conversation_participants SET unread_count = unread_count + 1 WHERE conversation_id = ? AND user_id <> ?')->execute([$conversationId, $currentUserId]);
 
-            Response::json(['data' => $this->fetchOne('SELECT * FROM messages WHERE id = LAST_INSERT_ID()')], 201);
+            Response::json(['data' => $this->fetchConversationMessageById((int) $pdo->lastInsertId(), $currentUserId)], 201);
+        }
+
+        if (($segments[2] ?? '') === 'messages' && isset($segments[3]) && is_numeric($segments[3])) {
+            $messageId = (int) $segments[3];
+            $this->requireConversationAccess($conversationId, $currentUserId);
+
+            if ($method === 'DELETE') {
+                $message = $this->fetchMessageById($messageId, $conversationId);
+                if (!$message) {
+                    Response::error('Message not found', 404);
+                }
+
+                $this->ensureMessageDeletable($message, $currentUserId);
+                $pdo->prepare('DELETE FROM messages WHERE id = ? AND conversation_id = ?')->execute([$messageId, $conversationId]);
+                Response::json(['message' => 'Message deleted']);
+            }
+
+            if ($method === 'PATCH' || $method === 'PUT') {
+                $data = $this->body();
+                $this->validateRequired($data, ['body']);
+
+                $message = $this->fetchMessageById($messageId, $conversationId);
+                if (!$message) {
+                    Response::error('Message not found', 404);
+                }
+
+                $this->ensureMessageEditable($message, $currentUserId);
+                $pdo->prepare('UPDATE messages SET body = ? WHERE id = ? AND conversation_id = ?')->execute([(string) $data['body'], $messageId, $conversationId]);
+
+                Response::json(['data' => $this->fetchConversationMessageById($messageId, $currentUserId)]);
+            }
         }
 
         if (($segments[2] ?? '') === 'read' && $method === 'PATCH') {
-            $pdo->prepare('UPDATE conversation_participants SET unread_count = 0, last_read_at = NOW() WHERE conversation_id = ? AND user_id = ?')->execute([$conversationId, $user['id']]);
+            $this->requireConversationAccess($conversationId, $currentUserId);
+            $pdo->prepare('UPDATE conversation_participants SET unread_count = 0, last_read_at = NOW() WHERE conversation_id = ? AND user_id = ?')->execute([$conversationId, $currentUserId]);
             Response::json(['message' => 'Conversation marked as read']);
         }
 
         Response::error('Method not allowed', 405);
+    }
+
+    private function handleCalendar(string $method, array $segments, array $user): void
+    {
+        $pdo = Database::pdo();
+
+        if ($method === 'POST' && count($segments) === 1) {
+            $this->requireAnyRole($user, ['administrador']);
+
+            if (!isset($_FILES['file']) || ($_FILES['file']['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) {
+                Response::error('PDF file is required', 422);
+            }
+
+            $originalName = basename((string) $_FILES['file']['name']);
+            $safeName = preg_replace('/[^A-Za-z0-9._-]/', '_', $originalName) ?: 'calendario.pdf';
+            if (strtolower(pathinfo($safeName, PATHINFO_EXTENSION)) !== 'pdf') {
+                $safeName .= '.pdf';
+            }
+
+            $uploadDir = __DIR__ . '/../storage/uploads/calendar/' . date('Y/m');
+            if (!is_dir($uploadDir) && !mkdir($uploadDir, 0777, true) && !is_dir($uploadDir)) {
+                Response::error('Unable to create upload directory', 500);
+            }
+
+            $storedName = uniqid('calendar_', true) . '_' . $safeName;
+            $storedPath = $uploadDir . '/' . $storedName;
+
+            if (!move_uploaded_file($_FILES['file']['tmp_name'], $storedPath)) {
+                Response::error('Unable to save uploaded file', 500);
+            }
+
+            $relativePath = 'storage/uploads/calendar/' . date('Y/m') . '/' . $storedName;
+
+            $pdo->beginTransaction();
+            try {
+                $pdo->prepare('UPDATE calendar_files SET is_active = 0 WHERE is_active = 1')->execute();
+
+                $statement = $pdo->prepare('INSERT INTO calendar_files (cycle_id, file_name, file_path, uploaded_by, uploaded_at, is_active) VALUES (?, ?, ?, ?, NOW(), 1)');
+                $statement->execute([
+                    $this->scalar("SELECT id FROM academic_cycles WHERE status = 'activo' ORDER BY id DESC LIMIT 1") ?: null,
+                    $originalName,
+                    $relativePath,
+                    $user['id'],
+                ]);
+
+                $pdo->commit();
+            } catch (\Throwable $exception) {
+                $pdo->rollBack();
+                throw $exception;
+            }
+
+            Response::json(['data' => $this->getCurrentCalendarMeta()], 201);
+        }
+
+        if ($method === 'DELETE' && count($segments) === 1) {
+            $this->requireAnyRole($user, ['administrador']);
+            $pdo->prepare('UPDATE calendar_files SET is_active = 0 WHERE is_active = 1')->execute();
+            Response::json(['message' => 'Calendario restaurado al archivo base']);
+        }
+
+        Response::error('Method not allowed', 405);
+    }
+
+    private function getCurrentCalendarMeta(): array
+    {
+        $current = $this->fetchOne('SELECT * FROM calendar_files WHERE is_active = 1 ORDER BY uploaded_at DESC, id DESC LIMIT 1');
+
+        if (!$current) {
+            return [
+                'id' => null,
+                'file_name' => 'Calendario25-26.pdf',
+                'file_url' => '/api/calendar/file',
+                'uploaded_at' => null,
+                'is_active' => false,
+            ];
+        }
+
+        return [
+            'id' => (int) $current['id'],
+            'file_name' => $current['file_name'],
+            'file_url' => '/api/calendar/file',
+            'uploaded_at' => $current['uploaded_at'],
+            'is_active' => (bool) $current['is_active'],
+        ];
+    }
+
+    private function streamCurrentCalendarFile(): never
+    {
+        $current = $this->fetchOne('SELECT * FROM calendar_files WHERE is_active = 1 ORDER BY uploaded_at DESC, id DESC LIMIT 1');
+        $absolutePath = $this->resolveCalendarAbsolutePath($current['file_path'] ?? null);
+        $fileName = $current['file_name'] ?? 'Calendario25-26.pdf';
+        $isDownload = isset($_GET['download']) && (string) $_GET['download'] === '1';
+
+        if (!is_file($absolutePath)) {
+            Response::error('Calendar file not found', 404);
+        }
+
+        http_response_code(200);
+        header('Content-Type: application/pdf');
+        header('Content-Disposition: ' . ($isDownload ? 'attachment' : 'inline') . '; filename="' . str_replace('"', '', (string) $fileName) . '"');
+        header('Content-Length: ' . (string) filesize($absolutePath));
+        header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+        header('Pragma: no-cache');
+        header('Access-Control-Allow-Origin: ' . Config::allowedFrontendOrigin());
+        header('Access-Control-Allow-Credentials: true');
+        header('Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, ngrok-skip-browser-warning');
+        header('Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS');
+        readfile($absolutePath);
+        exit;
+    }
+
+    private function resolveCalendarAbsolutePath(?string $relativePath): string
+    {
+        if ($relativePath !== null && $relativePath !== '') {
+            $storagePath = __DIR__ . '/../' . ltrim($relativePath, '/\\');
+            if (is_file($storagePath)) {
+                return $storagePath;
+            }
+        }
+
+        return __DIR__ . '/../../UT/src/assets/Calendario25-26.pdf';
     }
 
     private function dashboardStats(): void
@@ -631,7 +891,7 @@ final class Api
         $expiresAt = (new DateTimeImmutable())->add(new DateInterval('PT30M'))->format('Y-m-d H:i:s');
 
         $pdo = Database::pdo();
-        $statement = $pdo->prepare('INSERT INTO password_reset_tokens (email, token_hash, expires_at, created_at) VALUES (?, ?, ?, NOW()) ON DUPLICATE KEY UPDATE token_hash = VALUES(token_hash), expires_at = VALUES(expires_at), created_at = NOW()');
+        $statement = $pdo->prepare('INSERT INTO password_reset_tokens (email, token_hash, expires_at) VALUES (?, ?, ?)');
         $statement->execute([$user['email'], $hash, $expiresAt]);
 
         Response::json([
@@ -645,7 +905,7 @@ final class Api
         $data = $this->body();
         $this->validateRequired($data, ['email', 'token', 'password']);
 
-        if (($data['password_confirmation'] ?? null) !== null && $data['password_confirmation'] !== $data['password']) {
+        if (($data['password_confirmation'] ?? null) !== null && (string) $data['password_confirmation'] !== (string) $data['password']) {
             Response::error('La confirmacion de contrasena no coincide', 422);
         }
 
@@ -700,9 +960,244 @@ final class Api
         Response::error('No autorizado', 403);
     }
 
+    private function getPrimaryRoleCode(int $userId): string
+    {
+        $role = $this->fetchOne(
+            'SELECT r.code AS role_code FROM roles r JOIN user_roles ur ON ur.role_id = r.id WHERE ur.user_id = ? ORDER BY r.id ASC LIMIT 1',
+            [$userId]
+        );
+
+        return (string) ($role['role_code'] ?? 'docente');
+    }
+
+    private function loadUserConversations(int $userId): array
+    {
+        $conversationIds = $this->fetchAll(
+            'SELECT c.id FROM conversations c JOIN conversation_participants cp ON cp.conversation_id = c.id WHERE cp.user_id = ? ORDER BY c.updated_at DESC, c.id DESC',
+            [$userId]
+        );
+
+        $rows = [];
+        foreach ($conversationIds as $row) {
+            $formatted = $this->formatConversation((int) $row['id'], $userId);
+            if ($formatted !== null) {
+                $rows[] = $formatted;
+            }
+        }
+
+        return $rows;
+    }
+
+    private function findDirectConversationId(int $userAId, int $userBId): ?int
+    {
+        $conversation = $this->fetchOne(
+            'SELECT cp.conversation_id AS id FROM conversation_participants cp WHERE cp.user_id IN (?, ?) GROUP BY cp.conversation_id HAVING COUNT(DISTINCT cp.user_id) = 2 LIMIT 1',
+            [$userAId, $userBId]
+        );
+
+        return $conversation ? (int) $conversation['id'] : null;
+    }
+
+    private function createDirectConversation(int $userAId, int $userBId): int
+    {
+        $pdo = Database::pdo();
+        $pdo->beginTransaction();
+
+        try {
+            $pdo->exec('INSERT INTO conversations () VALUES ()');
+            $conversationId = (int) $pdo->lastInsertId();
+
+            $insert = $pdo->prepare('INSERT INTO conversation_participants (conversation_id, user_id, unread_count, last_read_at) VALUES (?, ?, 0, NULL)');
+            $insert->execute([$conversationId, $userAId]);
+            $insert->execute([$conversationId, $userBId]);
+
+            $pdo->commit();
+
+            return $conversationId;
+        } catch (\Throwable $exception) {
+            $pdo->rollBack();
+            throw $exception;
+        }
+    }
+
+    private function requireConversationAccess(int $conversationId, int $currentUserId): void
+    {
+        $participants = $this->fetchAll(
+            'SELECT u.id, r.code AS role_code FROM conversation_participants cp JOIN users u ON u.id = cp.user_id LEFT JOIN user_roles ur ON ur.user_id = u.id LEFT JOIN roles r ON r.id = ur.role_id WHERE cp.conversation_id = ? ORDER BY u.id ASC',
+            [$conversationId]
+        );
+
+        if (count($participants) !== 2) {
+            Response::error('Acceso denegado a esta conversación', 403);
+        }
+
+        $participantIds = array_map(static fn (array $participant): int => (int) $participant['id'], $participants);
+        if (!in_array($currentUserId, $participantIds, true)) {
+            Response::error('Acceso denegado a esta conversación', 403);
+        }
+
+        $roles = array_map(static fn (array $participant): string => (string) ($participant['role_code'] ?? 'docente'), $participants);
+        sort($roles);
+        if ($roles !== ['administrador', 'docente']) {
+            Response::error('Acceso denegado a esta conversación', 403);
+        }
+    }
+
+    private function formatConversation(int $conversationId, int $currentUserId): ?array
+    {
+        $conversation = $this->fetchOne('SELECT * FROM conversations WHERE id = ? LIMIT 1', [$conversationId]);
+        if (!$conversation) {
+            return null;
+        }
+
+        $participants = $this->fetchAll(
+            'SELECT u.id, u.full_name, u.avatar_url, r.code AS role_code, cp.unread_count FROM conversation_participants cp JOIN users u ON u.id = cp.user_id LEFT JOIN user_roles ur ON ur.user_id = u.id LEFT JOIN roles r ON r.id = ur.role_id WHERE cp.conversation_id = ? ORDER BY u.id ASC',
+            [$conversationId]
+        );
+
+        if (count($participants) !== 2) {
+            return null;
+        }
+
+        $currentParticipant = null;
+        $otherParticipant = null;
+        foreach ($participants as $participant) {
+            if ((int) $participant['id'] === $currentUserId) {
+                $currentParticipant = $participant;
+            } else {
+                $otherParticipant = $participant;
+            }
+        }
+
+        if ($currentParticipant === null || $otherParticipant === null) {
+            return null;
+        }
+
+        $latestMessage = $this->fetchOne(
+            'SELECT m.body, m.created_at, u.full_name AS sender_name FROM messages m JOIN users u ON u.id = m.sender_user_id WHERE m.conversation_id = ? ORDER BY m.created_at DESC, m.id DESC LIMIT 1',
+            [$conversationId]
+        );
+
+        $roleLabel = match ((string) ($otherParticipant['role_code'] ?? 'docente')) {
+            'administrador' => 'Administrador',
+            'tutor' => 'Tutor',
+            default => 'Docente',
+        };
+
+        return [
+            'id' => (int) $conversation['id'],
+            'name' => (string) $otherParticipant['full_name'],
+            'role' => $roleLabel,
+            'lastMessage' => (string) ($latestMessage['body'] ?? 'Nuevo chat'),
+            'timestamp' => (string) ($latestMessage['created_at'] ?? $conversation['updated_at'] ?? ''),
+            'unread' => (int) ($currentParticipant['unread_count'] ?? 0),
+            'avatar' => $this->buildAvatar((string) $otherParticipant['full_name']),
+            'status' => 'offline',
+            'participants' => array_map(static function (array $participant): array {
+                return [
+                    'id' => (int) $participant['id'],
+                    'name' => (string) $participant['full_name'],
+                    'role' => (string) ($participant['role_code'] ?? 'docente'),
+                ];
+            }, $participants),
+            'lastMessageAt' => (string) ($latestMessage['created_at'] ?? $conversation['updated_at'] ?? ''),
+        ];
+    }
+
+    private function fetchConversationMessages(int $conversationId, int $currentUserId): array
+    {
+        $messages = $this->fetchAll(
+            'SELECT m.id, m.body, m.reply_to_message_id, m.sender_user_id, m.created_at, sender.full_name AS sender_name, reply_sender.full_name AS reply_sender_name, reply_message.body AS reply_body FROM messages m JOIN users sender ON sender.id = m.sender_user_id LEFT JOIN messages reply_message ON reply_message.id = m.reply_to_message_id LEFT JOIN users reply_sender ON reply_sender.id = reply_message.sender_user_id WHERE m.conversation_id = ? ORDER BY m.created_at ASC, m.id ASC',
+            [$conversationId]
+        );
+
+        return array_map(static function (array $message) use ($currentUserId): array {
+            return [
+                'id' => (int) $message['id'],
+                'sender' => (string) ($message['sender_name'] ?? 'Usuario'),
+                'content' => (string) ($message['body'] ?? ''),
+                'timestamp' => (string) ($message['created_at'] ?? ''),
+                'isOwn' => (int) ($message['sender_user_id'] ?? 0) === $currentUserId,
+                'attachments' => [],
+                'replyTo' => !empty($message['reply_to_message_id']) ? [
+                    'id' => (int) $message['reply_to_message_id'],
+                    'sender' => (string) ($message['reply_sender_name'] ?? 'Usuario'),
+                    'content' => (string) ($message['reply_body'] ?? ''),
+                ] : null,
+            ];
+        }, $messages);
+    }
+
+    private function fetchConversationMessageById(int $messageId, int $currentUserId): ?array
+    {
+        $message = $this->fetchOne(
+            'SELECT m.id, m.body, m.reply_to_message_id, m.created_at, m.sender_user_id, sender.full_name AS sender_name, reply_sender.full_name AS reply_sender_name, reply_message.body AS reply_body FROM messages m JOIN users sender ON sender.id = m.sender_user_id LEFT JOIN messages reply_message ON reply_message.id = m.reply_to_message_id LEFT JOIN users reply_sender ON reply_sender.id = reply_message.sender_user_id WHERE m.id = ? LIMIT 1',
+            [$messageId]
+        );
+
+        if (!$message) {
+            return null;
+        }
+
+        return [
+            'id' => (int) $message['id'],
+            'sender' => (string) ($message['sender_name'] ?? 'Usuario'),
+            'content' => (string) ($message['body'] ?? ''),
+            'timestamp' => (string) ($message['created_at'] ?? ''),
+            'isOwn' => (int) ($message['sender_user_id'] ?? 0) === $currentUserId,
+            'attachments' => [],
+            'replyTo' => !empty($message['reply_to_message_id']) ? [
+                'id' => (int) $message['reply_to_message_id'],
+                'sender' => (string) ($message['reply_sender_name'] ?? 'Usuario'),
+                'content' => (string) ($message['reply_body'] ?? ''),
+            ] : null,
+        ];
+    }
+
+    private function fetchMessageById(int $messageId, int $conversationId): ?array
+    {
+        return $this->fetchOne(
+            'SELECT m.id, m.body, m.reply_to_message_id, m.sender_user_id, m.created_at FROM messages m WHERE m.id = ? AND m.conversation_id = ? LIMIT 1',
+            [$messageId, $conversationId]
+        );
+    }
+
+    private function ensureMessageDeletable(array $message, int $currentUserId): void
+    {
+        if ((int) ($message['sender_user_id'] ?? 0) !== $currentUserId) {
+            Response::error('No autorizado para eliminar este mensaje', 403);
+        }
+    }
+
+    private function ensureMessageEditable(array $message, int $currentUserId): void
+    {
+        $this->ensureMessageDeletable($message, $currentUserId);
+
+        $ageSeconds = (int) $this->scalar(
+            'SELECT TIMESTAMPDIFF(SECOND, created_at, NOW()) FROM messages WHERE id = ? LIMIT 1',
+            [(int) ($message['id'] ?? 0)]
+        );
+
+        if ($ageSeconds < 0 || $ageSeconds > 300) {
+            Response::error('No puedes editar este mensaje', 403);
+        }
+    }
+
+    private function buildAvatar(string $name): string
+    {
+        $parts = preg_split('/\s+/', trim($name)) ?: [];
+        $initials = '';
+
+        foreach (array_slice(array_values(array_filter($parts)), 0, 2) as $part) {
+            $initials .= strtoupper(substr($part, 0, 1));
+        }
+
+        return $initials !== '' ? $initials : 'CH';
+    }
+
     private function getUsersWithRoles(): array
     {
-        $users = $this->fetchAll('SELECT id, full_name, email, phone, area, avatar_url, is_active, created_at, updated_at FROM users ORDER BY full_name');
+        $users = $this->fetchAll('SELECT id, full_name, email, phone, area, avatar_url, is_active, created_at, updated_at, (SELECT COUNT(*) FROM documents d WHERE d.uploaded_by = users.id) AS documents_count FROM users ORDER BY full_name');
         foreach ($users as &$user) {
             $user['roles'] = array_map(static fn (array $role): array => ['id' => (int) $role['id'], 'code' => $role['code'], 'name' => $role['name']], $this->getRolesByUserId((int) $user['id']));
         }
@@ -712,7 +1207,7 @@ final class Api
 
     private function getUserById(int $userId): ?array
     {
-        $user = $this->fetchOne('SELECT id, full_name, email, phone, area, avatar_url, is_active, created_at, updated_at FROM users WHERE id = ?', [$userId]);
+        $user = $this->fetchOne('SELECT id, full_name, email, phone, area, avatar_url, is_active, created_at, updated_at, (SELECT COUNT(*) FROM documents d WHERE d.uploaded_by = users.id) AS documents_count FROM users WHERE id = ?', [$userId]);
         if (!$user) {
             return null;
         }
@@ -793,6 +1288,29 @@ final class Api
         $statement->execute($params);
 
         return $statement->fetchAll();
+    }
+
+    private function storageGroupsPath(): string
+    {
+        return __DIR__ . '/../storage/groups.json';
+    }
+
+    private function loadGroups(): array
+    {
+        $path = $this->storageGroupsPath();
+        if (!is_file($path)) return [];
+        $raw = file_get_contents($path);
+        $data = json_decode((string)$raw, true);
+        return is_array($data) ? $data : [];
+    }
+
+    private function saveGroups(array $groups): void
+    {
+        $path = $this->storageGroupsPath();
+        if (!is_dir(dirname($path))) {
+            @mkdir(dirname($path), 0777, true);
+        }
+        file_put_contents($path, json_encode(array_values($groups), JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
     }
 
     private function scalar(string $sql, array $params = []): mixed

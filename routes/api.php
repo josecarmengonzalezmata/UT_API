@@ -8,6 +8,7 @@ use App\Http\Controllers\Api\DocumentController;
 use App\Http\Controllers\Api\FormController;
 use App\Http\Controllers\Api\MessageController;
 use App\Http\Controllers\Api\UserController;
+use App\Http\Controllers\Api\GroupController;
 
 Route::prefix('auth')->group(function () {
     Route::post('/login', [AuthController::class, 'login']);
@@ -16,9 +17,16 @@ Route::prefix('auth')->group(function () {
 
     Route::middleware('auth:sanctum')->group(function () {
         Route::get('/me', [AuthController::class, 'me']);
+        Route::get('/profile/stats', [AuthController::class, 'profileStats']);
+        Route::patch('/profile', [AuthController::class, 'updateProfile']);
+        Route::patch('/password', [AuthController::class, 'updatePassword']);
         Route::post('/logout', [AuthController::class, 'logout']);
     });
 });
+
+// Allow public read access to groups so the frontend can list available groups without authentication.
+Route::get('/groups', [GroupController::class, 'index']);
+Route::get('/groups/{group}', [GroupController::class, 'show']);
 
 Route::middleware('auth:sanctum')->group(function () {
     Route::get('/dashboard/stats', [DashboardController::class, 'stats']);
@@ -26,7 +34,10 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::apiResource('forms', FormController::class)->only(['index', 'show', 'update']);
     Route::apiResource('cycles', CycleController::class);
     Route::apiResource('users', UserController::class);
+    // Protected group mutations (create, update, delete)
+    Route::apiResource('groups', GroupController::class)->except(['index','show']);
     Route::apiResource('documents', DocumentController::class);
+    Route::get('/documents/{document}/file', [DocumentController::class, 'file'])->name('documents.file');
 
     Route::get('/documents/{document}/history', [DocumentController::class, 'history']);
     Route::patch('/documents/{document}/review', [DocumentController::class, 'review']);
@@ -36,5 +47,6 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/conversations', [MessageController::class, 'storeConversation']);
     Route::get('/conversations/{conversation}/messages', [MessageController::class, 'messages']);
     Route::post('/conversations/{conversation}/messages', [MessageController::class, 'storeMessage']);
+    Route::delete('/conversations/{conversation}/messages/{message}', [MessageController::class, 'destroy']);
     Route::patch('/conversations/{conversation}/read', [MessageController::class, 'markAsRead']);
 });

@@ -9,11 +9,33 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Mail;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 
 class AuthController extends Controller
 {
+    private function formatUser(User $user): array
+    {
+        $parts = preg_split('/\s+/', trim($user->full_name), -1, PREG_SPLIT_NO_EMPTY) ?: [];
+        $firstNames = count($parts) <= 1 ? trim($user->full_name) : implode(' ', array_slice($parts, 0, -1));
+        $lastNames = count($parts) <= 1 ? '' : (string) array_slice($parts, -1)[0];
+
+        return [
+            'id' => $user->id,
+            'full_name' => $user->full_name,
+            'first_names' => $firstNames,
+            'last_names' => $lastNames,
+            'email' => $user->email,
+            'phone' => $user->phone,
+            'area' => $user->area,
+            'avatar_url' => $user->avatar_url,
+            'is_active' => $user->is_active,
+            'created_at' => $user->created_at?->toIso8601String(),
+            'roles' => $user->roles()->pluck('code')->values(),
+        ];
+    }
+
     public function login(Request $request): JsonResponse
     {
         $credentials = $request->validate([
@@ -34,16 +56,7 @@ class AuthController extends Controller
 
         return response()->json([
             'token' => $token,
-            'user' => [
-                'id' => $user->id,
-                'full_name' => $user->full_name,
-                'email' => $user->email,
-                'phone' => $user->phone,
-                'area' => $user->area,
-                'avatar_url' => $user->avatar_url,
-                'is_active' => $user->is_active,
-                'roles' => $roles,
-            ],
+            'user' => array_merge($this->formatUser($user), ['roles' => $roles]),
         ]);
     }
 
@@ -52,17 +65,72 @@ class AuthController extends Controller
         $user = $request->user();
 
         return response()->json([
-            'user' => [
-                'id' => $user->id,
-                'full_name' => $user->full_name,
-                'email' => $user->email,
-                'phone' => $user->phone,
-                'area' => $user->area,
-                'avatar_url' => $user->avatar_url,
-                'is_active' => $user->is_active,
-                'roles' => $user->roles()->pluck('code')->values(),
+            'user' => $this->formatUser($user),
+        ]);
+    }
+
+    public function profileStats(Request $request): JsonResponse
+    {
+        $user = $request->user();
+
+        return response()->json([
+            'stats' => [
+                'documents_sent' => \App\Models\Document::query()->where('uploaded_by', $user->id)->count(),
+                'documents_reviewed' => \App\Models\Document::query()->where('uploaded_by', $user->id)->where('status', 'revisado')->count(),
+                'documents_pending' => \App\Models\Document::query()->where('uploaded_by', $user->id)->where('status', 'pendiente')->count(),
+                'documents_returned' => \App\Models\Document::query()->where('uploaded_by', $user->id)->where('status', 'devuelto')->count(),
+                'member_since' => $user->created_at?->toIso8601String(),
             ],
         ]);
+    }
+
+    public function updateProfile(Request $request): JsonResponse
+    {
+        $user = $request->user();
+
+        $data = $request->validate([
+            'full_name' => ['sometimes', 'string', 'max:150'],
+            'phone' => ['nullable', 'digits:10'],
+            'area' => ['nullable', 'string', 'max:120'],
+            'avatar' => ['nullable', 'image', 'max:4096'],
+            'avatar_url' => ['nullable', 'string', 'max:255'],
+        ]);
+
+        if ($request->hasFile('avatar')) {
+            $path = $request->file('avatar')->store('avatars', 'public');
+            $data['avatar_url'] = Storage::disk('public')->url($path);
+        }
+
+        $user->fill([
+            'full_name' => $data['full_name'] ?? $user->full_name,
+            'phone' => array_key_exists('phone', $data) ? $data['phone'] : $user->phone,
+            'area' => array_key_exists('area', $data) ? $data['area'] : $user->area,
+            'avatar_url' => array_key_exists('avatar_url', $data) ? $data['avatar_url'] : $user->avatar_url,
+        ])->save();
+
+        return response()->json(['user' => $this->formatUser($user->fresh())]);
+    }
+
+    public function updatePassword(Request $request): JsonResponse
+    {
+        $data = $request->validate([
+            'current_password' => ['required', 'string'],
+            'password' => ['required', 'string', 'min:8', 'confirmed'],
+        ]);
+
+        $user = $request->user();
+
+        if (!Hash::check($data['current_password'], $user->password_hash)) {
+            throw ValidationException::withMessages([
+                'current_password' => ['La contraseña actual no es correcta.'],
+            ]);
+        }
+
+        $user->forceFill([
+            'password_hash' => Hash::make($data['password']),
+        ])->save();
+
+        return response()->json(['message' => 'Contraseña actualizada correctamente.']);
     }
 
     public function logout(Request $request): JsonResponse
