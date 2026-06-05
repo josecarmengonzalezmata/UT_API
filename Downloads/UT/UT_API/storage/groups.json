@@ -1,0 +1,18 @@
+[
+    {
+        "id": 1780274000295,
+        "careerCode": "OLCE",
+        "plan": "nuevo-modelo",
+        "cuatrimestre": 5,
+        "groupNumber": 1,
+        "name": "OLCE5-1"
+    },
+    {
+        "id": 1780273936688,
+        "careerCode": "AUT",
+        "plan": "nuevo-modelo",
+        "cuatrimestre": 2,
+        "groupNumber": 1,
+        "name": "AUT2-1"
+    }
+]
