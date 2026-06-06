@@ -98,7 +98,13 @@ final class Api
                 $data = $this->body();
                 $this->validateRequired($data, ['careerCode', 'plan', 'cuatrimestre', 'groupNumber']);
                 $groups = $this->loadGroups();
-                $id = (int) round(microtime(true) * 1000);
+                
+                $maxId = 0;
+                foreach ($groups as $g) {
+                    if ((int) $g['id'] > $maxId) $maxId = (int) $g['id'];
+                }
+                $id = $maxId + 1;
+                
                 $g = [
                     'id' => $id,
                     'careerCode' => strtoupper((string)$data['careerCode']),
@@ -204,6 +210,16 @@ final class Api
             return;
         }
 
+        if (($method === 'POST' || $method === 'PATCH' || $method === 'PUT') && $action === 'profile') {
+            $this->updateProfile();
+            return;
+        }
+
+        if (($method === 'POST' || $method === 'PATCH' || $method === 'PUT') && $action === 'password') {
+            $this->updatePassword();
+            return;
+        }
+
         if ($method === 'POST' && $action === 'forgot-password') {
             $this->forgotPassword();
             return;
@@ -211,6 +227,91 @@ final class Api
 
         if ($method === 'POST' && $action === 'reset-password') {
             $this->resetPassword();
+            return;
+        }
+
+        if ($method === 'GET' && $action === 'profile' && ($segments[2] ?? '') === 'stats') {
+            $this->profileStats();
+            return;
+        }
+
+        Response::error('Method not allowed', 405);
+    }
+
+    private function handleForms(string $method, array $segments, array $user): void
+    {
+        $pdo = Database::pdo();
+
+        if ($method === 'GET' && count($segments) === 1) {
+            $rows = $this->fetchAll(
+                'SELECT f.id, f.form_code, f.title, f.section, f.description, f.is_active, far.due_at, r.code AS role_code
+                 FROM forms f
+                 LEFT JOIN form_access_rules far ON far.form_id = f.id
+                 LEFT JOIN form_access_roles faro ON faro.form_access_rule_id = far.id
+                 LEFT JOIN roles r ON r.id = faro.role_id
+                 ORDER BY f.id, r.code'
+            );
+
+            $forms = [];
+            foreach ($rows as $row) {
+                $formId = (int) $row['id'];
+                if (!isset($forms[$formId])) {
+                    $forms[$formId] = [
+                        'id' => $formId,
+                        'form_code' => $row['form_code'],
+                        'title' => $row['title'],
+                        'section' => $row['section'],
+                        'description' => $row['description'],
+                        'is_active' => (bool) $row['is_active'],
+                        'due_at' => $row['due_at'] ?? null,
+                        'access_roles' => [],
+                    ];
+                }
+
+                if (!empty($row['role_code']) && !in_array($row['role_code'], $forms[$formId]['access_roles'], true)) {
+                    $forms[$formId]['access_roles'][] = $row['role_code'];
+                }
+            }
+
+            Response::json(['data' => array_values($forms)]);
+            return;
+        }
+
+        if ($method === 'GET' && count($segments) === 2 && is_numeric($segments[1])) {
+            $formId = (int) $segments[1];
+            $rows = $this->fetchAll(
+                'SELECT f.id, f.form_code, f.title, f.section, f.description, f.is_active, far.due_at, r.code AS role_code
+                 FROM forms f
+                 LEFT JOIN form_access_rules far ON far.form_id = f.id
+                 LEFT JOIN form_access_roles faro ON faro.form_access_rule_id = far.id
+                 LEFT JOIN roles r ON r.id = faro.role_id
+                 WHERE f.id = ?
+                 ORDER BY r.code',
+                [$formId]
+            );
+
+            if (count($rows) === 0) {
+                Response::error('Form not found', 404);
+            }
+
+            $form = [
+                'id' => $formId,
+                'form_code' => $rows[0]['form_code'],
+                'title' => $rows[0]['title'],
+                'section' => $rows[0]['section'],
+                'description' => $rows[0]['description'],
+                'is_active' => (bool) $rows[0]['is_active'],
+                'due_at' => $rows[0]['due_at'] ?? null,
+                'access_roles' => [],
+            ];
+
+            foreach ($rows as $row) {
+                if (!empty($row['role_code']) && !in_array($row['role_code'], $form['access_roles'], true)) {
+                    $form['access_roles'][] = $row['role_code'];
+                }
+            }
+
+            Response::json(['data' => $form]);
             return;
         }
 
@@ -1197,7 +1298,9 @@ final class Api
 
     private function getUsersWithRoles(): array
     {
-        $users = $this->fetchAll('SELECT id, full_name, email, phone, area, avatar_url, is_active, created_at, updated_at, (SELECT COUNT(*) FROM documents d WHERE d.uploaded_by = users.id) AS documents_count FROM users ORDER BY full_name');
+        $users = $this->fetchAll(
+            "SELECT id, full_name, email, phone, area, avatar_url, is_active, created_at, updated_at, (SELECT COUNT(*) FROM documents d WHERE d.uploaded_by = users.id) AS documents_count FROM users WHERE email NOT IN ('docente1@utslrc.edu.mx', 'tutor1@utslrc.edu.mx') ORDER BY full_name"
+        );
         foreach ($users as &$user) {
             $user['roles'] = array_map(static fn (array $role): array => ['id' => (int) $role['id'], 'code' => $role['code'], 'name' => $role['name']], $this->getRolesByUserId((int) $user['id']));
         }
@@ -1319,6 +1422,119 @@ final class Api
         $statement->execute($params);
 
         return $statement->fetchColumn();
+    }
+
+    private function updateProfile(): void
+    {
+        $user = $this->requireUser();
+        $data = $this->body();
+
+        $fullName = trim((string) ($data['full_name'] ?? ''));
+        $phone = array_key_exists('phone', $data) ? trim((string) $data['phone']) : (string) ($user['phone'] ?? '');
+        $area = array_key_exists('area', $data) ? trim((string) $data['area']) : (string) ($user['area'] ?? '');
+
+        if ($fullName === '') {
+            $fullName = (string) ($user['full_name'] ?? '');
+        }
+
+        if ($fullName === '') {
+            Response::error('El nombre no puede quedar vacío', 422);
+        }
+
+        $avatarUrl = $user['avatar_url'] ?? null;
+        if (isset($_FILES['avatar']) && ($_FILES['avatar']['error'] ?? UPLOAD_ERR_NO_FILE) === UPLOAD_ERR_OK) {
+            $tmpName = (string) $_FILES['avatar']['tmp_name'];
+            $originalName = basename((string) ($_FILES['avatar']['name'] ?? 'avatar'));
+            $extension = strtolower(pathinfo($originalName, PATHINFO_EXTENSION));
+            if (!in_array($extension, ['jpg', 'jpeg', 'png', 'gif', 'webp'], true)) {
+                Response::error('Selecciona una imagen válida', 422);
+            }
+
+            $uploadDir = __DIR__ . '/../public/uploads/avatars';
+            if (!is_dir($uploadDir) && !mkdir($uploadDir, 0777, true) && !is_dir($uploadDir)) {
+                Response::error('No se pudo crear la carpeta de avatares', 500);
+            }
+
+            $storedName = 'avatar_' . $user['id'] . '_' . bin2hex(random_bytes(6)) . '.' . $extension;
+            $storedPath = $uploadDir . '/' . $storedName;
+
+            if (!move_uploaded_file($tmpName, $storedPath)) {
+                Response::error('No se pudo guardar el avatar', 500);
+            }
+
+            $avatarUrl = '/uploads/avatars/' . $storedName;
+        }
+
+        $pdo = Database::pdo();
+        $statement = $pdo->prepare('UPDATE users SET full_name = ?, phone = ?, area = ?, avatar_url = ? WHERE id = ?');
+        $statement->execute([
+            $fullName,
+            $phone !== '' ? $phone : null,
+            $area !== '' ? $area : null,
+            $avatarUrl,
+            $user['id'],
+        ]);
+
+        Response::json(['user' => $this->getUserById((int) $user['id'])]);
+    }
+
+    private function profileStats(): void
+    {
+        $user = $this->requireUser();
+        $pdo = Database::pdo();
+
+        $documentsSent = (int) $this->scalar('SELECT COUNT(*) FROM documents WHERE uploaded_by = ?', [(int) $user['id']]);
+        $documentsReviewed = (int) $this->scalar('SELECT COUNT(*) FROM documents WHERE uploaded_by = ? AND status = ?', [(int) $user['id'], 'revisado']);
+        $documentsPending = (int) $this->scalar('SELECT COUNT(*) FROM documents WHERE uploaded_by = ? AND status = ?', [(int) $user['id'], 'pendiente']);
+        $documentsReturned = (int) $this->scalar('SELECT COUNT(*) FROM documents WHERE uploaded_by = ? AND status = ?', [(int) $user['id'], 'devuelto']);
+
+        Response::json([
+            'stats' => [
+                'documents_sent' => $documentsSent,
+                'documents_reviewed' => $documentsReviewed,
+                'documents_pending' => $documentsPending,
+                'documents_returned' => $documentsReturned,
+                'member_since' => $user['created_at'] ?? null,
+            ],
+        ]);
+    }
+
+    private function updatePassword(): void
+    {
+        $user = $this->requireUser();
+        $data = $this->body();
+
+        $currentPassword = (string) ($data['current_password'] ?? '');
+        $newPassword = (string) ($data['password'] ?? '');
+        $confirmation = (string) ($data['password_confirmation'] ?? $data['password_confirmation'] ?? '');
+
+        if ($currentPassword === '' || $newPassword === '' || $confirmation === '') {
+            Response::error('Completa todos los campos de contraseña', 422);
+        }
+
+        if (strlen($newPassword) < 8) {
+            Response::error('La nueva contraseña debe tener al menos 8 caracteres', 422);
+        }
+
+        if ($newPassword !== $confirmation) {
+            Response::error('La confirmación no coincide', 422);
+        }
+
+        $pdo = Database::pdo();
+        $stored = $pdo->prepare('SELECT password_hash FROM users WHERE id = ?');
+        $stored->execute([(int) $user['id']]);
+        $currentHash = (string) ($stored->fetchColumn() ?: '');
+
+        if ($currentHash === '' || !password_verify($currentPassword, $currentHash)) {
+            Response::error('La contraseña actual no es correcta', 422);
+        }
+
+        $pdo->prepare('UPDATE users SET password_hash = ? WHERE id = ?')->execute([
+            password_hash($newPassword, PASSWORD_DEFAULT),
+            $user['id'],
+        ]);
+
+        Response::json(['message' => 'Contraseña actualizada correctamente']);
     }
 }
 

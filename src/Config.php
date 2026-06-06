@@ -51,8 +51,19 @@ final class Config
 
         $list = array_map('trim', explode(',', $allowed));
         foreach ($list as $item) {
+            if ($item === '*') {
+                return $origin;
+            }
+
             if ($item === $origin) {
                 return $origin;
+            }
+
+            if (str_contains($item, '*')) {
+                $pattern = '/^' . str_replace(['\*', '\/'], ['.*', '\/'], preg_quote($item, '/')) . '$/i';
+                if (preg_match($pattern, $origin) === 1) {
+                    return $origin;
+                }
             }
         }
 

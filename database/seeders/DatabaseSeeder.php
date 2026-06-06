@@ -3,6 +3,7 @@
 namespace Database\Seeders;
 
 use App\Models\Form;
+use App\Models\FormAccessRule;
 use App\Models\Role;
 use App\Models\User;
 use Illuminate\Database\Seeder;
@@ -37,38 +38,7 @@ class DatabaseSeeder extends Seeder
 
         $adminUser->roles()->sync([$roles['administrador']->id]);
 
-        $sampleUsers = [
-            [
-                'email' => 'docente1@utslrc.edu.mx',
-                'full_name' => 'Docente Uno',
-                'password' => '12345678',
-                'area' => 'Academia',
-                'role' => 'docente',
-            ],
-            [
-                'email' => 'tutor1@utslrc.edu.mx',
-                'full_name' => 'Tutor Uno',
-                'password' => '12345678',
-                'area' => 'Tutorías',
-                'role' => 'tutor',
-            ],
-        ];
-
-        foreach ($sampleUsers as $sampleUser) {
-            $user = User::query()->updateOrCreate(
-                ['email' => $sampleUser['email']],
-                [
-                    'full_name' => $sampleUser['full_name'],
-                    'password_hash' => Hash::make($sampleUser['password']),
-                    'phone' => null,
-                    'area' => $sampleUser['area'],
-                    'avatar_url' => null,
-                    'is_active' => true,
-                ]
-            );
-
-            $user->roles()->sync([$roles[$sampleUser['role']]->id]);
-        }
+        // Local placeholder users have been removed from seed data. Use real database users instead.
 
         User::query()
             ->where('id', '!=', $adminUser->id)
@@ -80,11 +50,41 @@ class DatabaseSeeder extends Seeder
                 $user->roles()->detach($roles['administrador']->id);
             });
 
+        $defaultFormRoles = [
+            'planeacion' => ['docente'],
+            'instrumento-3040' => ['docente'],
+            'instrumento-6070' => ['docente'],
+            'instrumento-30-normal' => ['docente'],
+            'instrumento-40-nuevo' => ['docente'],
+            'instrumento-60-nuevo' => ['docente'],
+            'instrumento-70-normal' => ['docente'],
+            'lista-concentrada' => ['docente'],
+            'remedial' => ['docente'],
+            'asesoria' => ['docente'],
+            'portafolio-digital' => ['docente'],
+            'acta-final' => ['docente'],
+            'estadias' => ['docente'],
+            'tutorias' => ['docente'],
+            'carga-academica' => ['docente', 'tutor'],
+            'reporte-bajas' => ['docente', 'tutor'],
+            'concentrado-asesorias' => ['docente', 'tutor'],
+            'acta-asistencia-grupal' => ['docente', 'tutor'],
+            'ficha-tecnica' => ['docente', 'tutor'],
+            'carta-presentacion' => ['docente', 'tutor'],
+            'carta-aceptacion' => ['docente', 'tutor'],
+            'carta-terminacion' => ['docente', 'tutor'],
+        ];
+
         foreach ([
             ['form_code' => 'planeacion', 'title' => 'Planeación', 'section' => 'docentes'],
             ['form_code' => 'instrumento-3040', 'title' => 'Instrumento 30/40%', 'section' => 'docentes'],
             ['form_code' => 'instrumento-6070', 'title' => 'Instrumento 60/70%', 'section' => 'docentes'],
+            ['form_code' => 'instrumento-30-normal', 'title' => 'Instrumento 30 Normal', 'section' => 'docentes'],
+            ['form_code' => 'instrumento-40-nuevo', 'title' => 'Instrumento 40 Nuevo', 'section' => 'docentes'],
+            ['form_code' => 'instrumento-60-nuevo', 'title' => 'Instrumento 60 Nuevo', 'section' => 'docentes'],
+            ['form_code' => 'instrumento-70-normal', 'title' => 'Instrumento 70 Normal', 'section' => 'docentes'],
             ['form_code' => 'lista-concentrada', 'title' => 'Lista Concentrada', 'section' => 'docentes'],
+            ['form_code' => 'remedial', 'title' => 'Remedial', 'section' => 'docentes'],
             ['form_code' => 'asesoria', 'title' => 'Asesoría', 'section' => 'docentes'],
             ['form_code' => 'portafolio-digital', 'title' => 'Portafolio Digital Final', 'section' => 'docentes'],
             ['form_code' => 'acta-final', 'title' => 'Acta Final', 'section' => 'docentes'],
@@ -99,7 +99,7 @@ class DatabaseSeeder extends Seeder
             ['form_code' => 'carta-aceptacion', 'title' => 'Carta de Aceptación', 'section' => 'estadias'],
             ['form_code' => 'carta-terminacion', 'title' => 'Carta de Terminación', 'section' => 'estadias'],
         ] as $form) {
-            Form::query()->updateOrCreate(
+            $formModel = Form::query()->updateOrCreate(
                 ['form_code' => $form['form_code']],
                 [
                     'title' => $form['title'],
@@ -107,6 +107,21 @@ class DatabaseSeeder extends Seeder
                     'description' => $form['description'] ?? null,
                     'is_active' => true,
                 ]
+            );
+
+            $accessRule = FormAccessRule::query()->updateOrCreate(
+                ['form_id' => $formModel->id],
+                [
+                    'due_at' => null,
+                    'updated_by' => $adminUser->id,
+                ]
+            );
+
+            $accessRule->roles()->sync(
+                Role::query()
+                    ->whereIn('code', $defaultFormRoles[$form['form_code']])
+                    ->pluck('id')
+                    ->all()
             );
         }
     }
