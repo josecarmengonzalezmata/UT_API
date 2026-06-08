@@ -33,16 +33,14 @@ final class Config
 
     public static function frontendUrl(): string
     {
-        return Env::get('FRONTEND_URL', 'http://localhost:5173') ?? 'http://localhost:5173';
+        $url = Env::get('FRONTEND_URL', 'http://localhost:5173') ?? 'http://localhost:5173';
+
+        return self::normalizeOrigin($url);
     }
 
     public static function allowedFrontendOrigin(): string
     {
-        $origin = $_SERVER['HTTP_ORIGIN'] ?? null;
-
-        if ($origin === null) {
-            return self::frontendUrl();
-        }
+        $origin = self::normalizeOrigin($_SERVER['HTTP_ORIGIN'] ?? self::frontendUrl());
 
         $allowed = Env::get('FRONTEND_ALLOWED', '');
         if ($allowed === null || trim($allowed) === '') {
@@ -51,16 +49,14 @@ final class Config
 
         $list = array_map('trim', explode(',', $allowed));
         foreach ($list as $item) {
-            if ($item === '*') {
+            $candidate = self::normalizeOrigin($item);
+
+            if ($candidate === '*' || $candidate === $origin) {
                 return $origin;
             }
 
-            if ($item === $origin) {
-                return $origin;
-            }
-
-            if (str_contains($item, '*')) {
-                $pattern = '/^' . str_replace(['\*', '\/'], ['.*', '\/'], preg_quote($item, '/')) . '$/i';
+            if (str_contains($candidate, '*')) {
+                $pattern = '/^' . str_replace(['\*', '\/'], ['.*', '\/'], preg_quote($candidate, '/')) . '$/i';
                 if (preg_match($pattern, $origin) === 1) {
                     return $origin;
                 }
@@ -68,5 +64,30 @@ final class Config
         }
 
         return self::frontendUrl();
+    }
+
+    private static function normalizeOrigin(string $value): string
+    {
+        $value = trim($value);
+
+        if ($value === '') {
+            return 'http://localhost:5173';
+        }
+
+        if (str_starts_with($value, 'http://') || str_starts_with($value, 'https://')) {
+            $parts = parse_url($value);
+
+            if (is_array($parts) && isset($parts['scheme'], $parts['host'])) {
+                $origin = $parts['scheme'] . '://' . $parts['host'];
+
+                if (isset($parts['port'])) {
+                    $origin .= ':' . $parts['port'];
+                }
+
+                return $origin;
+            }
+        }
+
+        return rtrim($value, '/');
     }
 }

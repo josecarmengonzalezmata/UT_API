@@ -1,5 +1,4 @@
 <?php
-
 declare(strict_types=1);
 
 namespace App;
@@ -70,8 +69,47 @@ final class Api
         }
 
         if ($first === 'groups') {
-            // public listing
+            // public listing: if query contains career_code/cuatrimestre/cycle_id, read from DB
             if ($method === 'GET' && count($segments) === 1) {
+                $careerCode = $_GET['career_code'] ?? null;
+                $careerId = isset($_GET['career_id']) ? (int) $_GET['career_id'] : null;
+                $cuatrimestre = isset($_GET['cuatrimestre']) ? (int) $_GET['cuatrimestre'] : null;
+                $cycleId = isset($_GET['cycle_id']) ? (int) $_GET['cycle_id'] : null;
+
+                if ($careerCode || $careerId || $cuatrimestre) {
+                    $pdo = Database::pdo();
+                    $sql = 'SELECT g.id, g.career_id, g.cycle_id, g.cuatrimestre, g.group_number, g.group_code FROM groups g JOIN careers c ON c.id = g.career_id WHERE 1=1';
+                    $params = [];
+                    if ($careerCode) {
+                        $sql .= ' AND c.code = ?';
+                        $params[] = strtoupper((string) $careerCode);
+                    }
+                    if ($careerId) {
+                        $sql .= ' AND g.career_id = ?';
+                        $params[] = $careerId;
+                    }
+                    if ($cuatrimestre) {
+                        $sql .= ' AND g.cuatrimestre = ?';
+                        $params[] = $cuatrimestre;
+                    }
+                    if ($cycleId) {
+                        $sql .= ' AND g.cycle_id = ?';
+                        $params[] = $cycleId;
+                    }
+                    $sql .= ' ORDER BY g.group_number';
+                    $rows = $this->fetchAll($sql, $params);
+                    // normalize group_code to use hyphen instead of underscore
+                    foreach ($rows as &$r) {
+                        if (isset($r['group_code'])) {
+                            $r['group_code'] = str_replace('_', '-', (string)$r['group_code']);
+                        }
+                    }
+                    unset($r);
+                    Response::json(['data' => $rows]);
+                    return;
+                }
+
+                // storage-backed groups (JSON) are returned as-is
                 Response::json(['data' => $this->loadGroups()]);
                 return;
             }
@@ -209,11 +247,10 @@ final class Api
             $this->logout();
             return;
         }
-
-        if (($method === 'POST' || $method === 'PATCH' || $method === 'PUT') && $action === 'profile') {
-            $this->updateProfile();
-            return;
-        }
+if (($method === 'POST' || $method === 'PATCH' || $method === 'PUT') && $action === 'profile') {
+    $this->updateProfile();
+    return;
+}
 
         if (($method === 'POST' || $method === 'PATCH' || $method === 'PUT') && $action === 'password') {
             $this->updatePassword();
@@ -529,11 +566,14 @@ final class Api
         $pdo = Database::pdo();
 
         if ($method === 'GET' && count($segments) === 1) {
-            $sql = 'SELECT d.*, f.form_code, f.title AS form_title, ac.name AS cycle_name, u.full_name AS uploaded_by_name
+                    $sql = 'SELECT d.*, f.form_code, f.title AS form_title, ac.name AS cycle_name, u.full_name AS uploaded_by_name,
+                        g.group_code AS group_code, g.group_number AS group_number, g.group_code AS group_name, ar.full_name AS assigned_reviewer_name
                     FROM documents d
                     JOIN forms f ON f.id = d.form_id
                     LEFT JOIN academic_cycles ac ON ac.id = d.cycle_id
-                    JOIN users u ON u.id = d.uploaded_by';
+                    JOIN users u ON u.id = d.uploaded_by
+                    LEFT JOIN groups g ON g.id = d.group_id
+                    LEFT JOIN users ar ON ar.id = d.assigned_reviewer_id';
             $params = [];
             $filters = [];
 
@@ -549,17 +589,74 @@ final class Api
                 $filters[] = 'd.form_id = ?';
                 $params[] = (int) $_GET['form_id'];
             }
+            if (!empty($_GET['group_id'])) {
+                $filters[] = 'd.group_id = ?';
+                $params[] = (int) $_GET['group_id'];
+            }
+            if (!empty($_GET['plan'])) {
+                $filters[] = 'd.plan = ?';
+                $params[] = $_GET['plan'];
+            }
+            if (!empty($_GET['carrera_label'])) {
+                $filters[] = 'd.carrera_label = ?';
+                $params[] = $_GET['carrera_label'];
+            }
+            if (!empty($_GET['materia'])) {
+                $filters[] = 'd.materia = ?';
+                $params[] = $_GET['materia'];
+            }
+            if (!empty($_GET['apartado_label'])) {
+                $filters[] = 'd.apartado_label = ?';
+                $params[] = $_GET['apartado_label'];
+            }
             if (!empty($_GET['uploaded_by'])) {
                 $filters[] = 'd.uploaded_by = ?';
                 $params[] = (int) $_GET['uploaded_by'];
+            }
+            if (!empty($_GET['uploaded_by_name'])) {
+                $filters[] = 'u.full_name LIKE ?';
+                $params[] = '%' . str_replace('%', '\\%', $_GET['uploaded_by_name']) . '%';
+            }
+            if (!empty($_GET['uploader_role'])) {
+                $filters[] = 'EXISTS (SELECT 1 FROM user_roles ur JOIN roles r ON r.id = ur.role_id WHERE ur.user_id = u.id AND r.code = ?)';
+                $params[] = $_GET['uploader_role'];
+            }
+            if (!empty($_GET['search'])) {
+                $filters[] = '(d.title LIKE ? OR d.carrera_label LIKE ? OR d.materia LIKE ? OR d.apartado_label LIKE ?)';
+                $search = '%' . str_replace('%', '\\%', $_GET['search']) . '%';
+                $params[] = $search;
+                $params[] = $search;
+                $params[] = $search;
+                $params[] = $search;
             }
 
             if ($filters) {
                 $sql .= ' WHERE ' . implode(' AND ', $filters);
             }
 
+            // Pagination support (optional)
+            $page = max(1, (int) ($_GET['page'] ?? 1));
+            $perPage = max(1, (int) ($_GET['per_page'] ?? 20));
+            // compute total matching rows
+            $countSql = 'SELECT COUNT(1) AS total FROM (' . $sql . ') AS tmp_count';
+            $totalRow = $this->fetchOne($countSql, $params);
+            $total = $totalRow['total'] ?? 0;
+
             $sql .= ' ORDER BY d.submitted_at DESC';
-            Response::json(['data' => $this->fetchAll($sql, $params)]);
+            $offset = ($page - 1) * $perPage;
+            $sql .= ' LIMIT ? OFFSET ?';
+            $params[] = $perPage;
+            $params[] = $offset;
+
+            $rows = $this->fetchAll($sql, $params);
+            // normalize group_code in documents to use hyphen instead of underscore
+            foreach ($rows as &$row) {
+                if (isset($row['group_code'])) {
+                    $row['group_code'] = str_replace('_', '-', (string)$row['group_code']);
+                }
+            }
+            unset($row);
+            Response::json(['data' => $rows, 'meta' => ['total' => (int) $total, 'page' => $page, 'per_page' => $perPage]]);
         }
 
         if ($method === 'POST' && count($segments) === 1) {
@@ -615,6 +712,23 @@ final class Api
         $id = isset($segments[1]) ? (int) $segments[1] : 0;
         if ($id <= 0) {
             Response::error('Invalid document id', 422);
+        }
+
+        if (($segments[2] ?? '') === 'file' && $method === 'GET') {
+            $doc = $this->fetchOne('SELECT file_path, mime_type, title FROM documents WHERE id = ?', [$id]);
+            if (!$doc) {
+                Response::error('Document not found', 404);
+            }
+            $fullPath = __DIR__ . '/../' . $doc['file_path'];
+            if (!file_exists($fullPath)) {
+                Response::error('File not found', 404);
+            }
+            $mime = $doc['mime_type'] ?? (function_exists('mime_content_type') ? mime_content_type($fullPath) : 'application/octet-stream');
+            header('Content-Type: ' . $mime);
+            header('Content-Length: ' . filesize($fullPath));
+            header('Content-Disposition: attachment; filename="' . basename($doc['file_path']) . '"');
+            readfile($fullPath);
+            exit;
         }
 
         if (($segments[2] ?? '') === 'history' && $method === 'GET') {
@@ -1144,67 +1258,68 @@ final class Api
         }
     }
 
-    private function formatConversation(int $conversationId, int $currentUserId): ?array
-    {
-        $conversation = $this->fetchOne('SELECT * FROM conversations WHERE id = ? LIMIT 1', [$conversationId]);
-        if (!$conversation) {
-            return null;
-        }
-
-        $participants = $this->fetchAll(
-            'SELECT u.id, u.full_name, u.avatar_url, r.code AS role_code, cp.unread_count FROM conversation_participants cp JOIN users u ON u.id = cp.user_id LEFT JOIN user_roles ur ON ur.user_id = u.id LEFT JOIN roles r ON r.id = ur.role_id WHERE cp.conversation_id = ? ORDER BY u.id ASC',
-            [$conversationId]
-        );
-
-        if (count($participants) !== 2) {
-            return null;
-        }
-
-        $currentParticipant = null;
-        $otherParticipant = null;
-        foreach ($participants as $participant) {
-            if ((int) $participant['id'] === $currentUserId) {
-                $currentParticipant = $participant;
-            } else {
-                $otherParticipant = $participant;
-            }
-        }
-
-        if ($currentParticipant === null || $otherParticipant === null) {
-            return null;
-        }
-
-        $latestMessage = $this->fetchOne(
-            'SELECT m.body, m.created_at, u.full_name AS sender_name FROM messages m JOIN users u ON u.id = m.sender_user_id WHERE m.conversation_id = ? ORDER BY m.created_at DESC, m.id DESC LIMIT 1',
-            [$conversationId]
-        );
-
-        $roleLabel = match ((string) ($otherParticipant['role_code'] ?? 'docente')) {
-            'administrador' => 'Administrador',
-            'tutor' => 'Tutor',
-            default => 'Docente',
-        };
-
-        return [
-            'id' => (int) $conversation['id'],
-            'name' => (string) $otherParticipant['full_name'],
-            'role' => $roleLabel,
-            'lastMessage' => (string) ($latestMessage['body'] ?? 'Nuevo chat'),
-            'timestamp' => (string) ($latestMessage['created_at'] ?? $conversation['updated_at'] ?? ''),
-            'unread' => (int) ($currentParticipant['unread_count'] ?? 0),
-            'avatar' => $this->buildAvatar((string) $otherParticipant['full_name']),
-            'status' => 'offline',
-            'participants' => array_map(static function (array $participant): array {
-                return [
-                    'id' => (int) $participant['id'],
-                    'name' => (string) $participant['full_name'],
-                    'role' => (string) ($participant['role_code'] ?? 'docente'),
-                ];
-            }, $participants),
-            'lastMessageAt' => (string) ($latestMessage['created_at'] ?? $conversation['updated_at'] ?? ''),
-        ];
+  private function formatConversation(int $conversationId, int $currentUserId): ?array
+{
+    $conversation = $this->fetchOne('SELECT * FROM conversations WHERE id = ? LIMIT 1', [$conversationId]);
+    if (!$conversation) {
+        return null;
     }
 
+    $participants = $this->fetchAll(
+        'SELECT u.id, u.full_name, u.avatar_url, r.code AS role_code, cp.unread_count FROM conversation_participants cp JOIN users u ON u.id = cp.user_id LEFT JOIN user_roles ur ON ur.user_id = u.id LEFT JOIN roles r ON r.id = ur.role_id WHERE cp.conversation_id = ? ORDER BY u.id ASC',
+        [$conversationId]
+    );
+
+    if (count($participants) !== 2) {
+        return null;
+    }
+
+    $currentParticipant = null;
+    $otherParticipant = null;
+    foreach ($participants as $participant) {
+        if ((int) $participant['id'] === $currentUserId) {
+            $currentParticipant = $participant;
+        } else {
+            $otherParticipant = $participant;
+        }
+    }
+
+    if ($currentParticipant === null || $otherParticipant === null) {
+        return null;
+    }
+
+    $latestMessage = $this->fetchOne(
+        'SELECT m.body, m.created_at, u.full_name AS sender_name FROM messages m JOIN users u ON u.id = m.sender_user_id WHERE m.conversation_id = ? ORDER BY m.created_at DESC, m.id DESC LIMIT 1',
+        [$conversationId]
+    );
+
+    $roleLabel = match ((string) ($otherParticipant['role_code'] ?? 'docente')) {
+        'administrador' => 'Administrador',
+        'tutor' => 'Tutor',
+        default => 'Docente',
+    };
+
+    return [
+        'id' => (int) $conversation['id'],
+        'name' => (string) $otherParticipant['full_name'],
+        'role' => $roleLabel,
+        'lastMessage' => (string) ($latestMessage['body'] ?? 'Nuevo chat'),
+        'timestamp' => (string) ($latestMessage['created_at'] ?? $conversation['updated_at'] ?? ''),
+        'unread' => (int) ($currentParticipant['unread_count'] ?? 0),
+        'avatar_url' => $otherParticipant['avatar_url'] ?? null,
+        'avatar' => $otherParticipant['avatar_url'] ?? $this->buildAvatar((string) $otherParticipant['full_name']),
+        'status' => 'offline',
+        'participants' => array_map(static function (array $participant): array {
+            return [
+                'id' => (int) $participant['id'],
+                'name' => (string) $participant['full_name'],
+                'role' => (string) ($participant['role_code'] ?? 'docente'),
+                'avatar_url' => $participant['avatar_url'] ?? null,
+            ];
+        }, $participants),
+        'lastMessageAt' => (string) ($latestMessage['created_at'] ?? $conversation['updated_at'] ?? ''),
+    ];
+}
     private function fetchConversationMessages(int $conversationId, int $currentUserId): array
     {
         $messages = $this->fetchAll(
@@ -1219,6 +1334,8 @@ final class Api
                 'content' => (string) ($message['body'] ?? ''),
                 'timestamp' => (string) ($message['created_at'] ?? ''),
                 'isOwn' => (int) ($message['sender_user_id'] ?? 0) === $currentUserId,
+                'avatar_url' => $message['sender_avatar'] ?? null,  
+                'avatar' => $message['sender_avatar'] ?? null,  
                 'attachments' => [],
                 'replyTo' => !empty($message['reply_to_message_id']) ? [
                     'id' => (int) $message['reply_to_message_id'],
@@ -1228,33 +1345,40 @@ final class Api
             ];
         }, $messages);
     }
+private function fetchConversationMessageById(int $messageId, int $currentUserId): ?array
+{
+    $message = $this->fetchOne(
+        'SELECT m.id, m.body, m.reply_to_message_id, m.created_at, m.sender_user_id, 
+         sender.full_name AS sender_name, sender.avatar_url AS sender_avatar,
+         reply_sender.full_name AS reply_sender_name, reply_sender.avatar_url AS reply_sender_avatar,
+         reply_message.body AS reply_body 
+         FROM messages m 
+         JOIN users sender ON sender.id = m.sender_user_id 
+         LEFT JOIN messages reply_message ON reply_message.id = m.reply_to_message_id 
+         LEFT JOIN users reply_sender ON reply_sender.id = reply_message.sender_user_id 
+         WHERE m.id = ? LIMIT 1',
+        [$messageId]
+    );
 
-    private function fetchConversationMessageById(int $messageId, int $currentUserId): ?array
-    {
-        $message = $this->fetchOne(
-            'SELECT m.id, m.body, m.reply_to_message_id, m.created_at, m.sender_user_id, sender.full_name AS sender_name, reply_sender.full_name AS reply_sender_name, reply_message.body AS reply_body FROM messages m JOIN users sender ON sender.id = m.sender_user_id LEFT JOIN messages reply_message ON reply_message.id = m.reply_to_message_id LEFT JOIN users reply_sender ON reply_sender.id = reply_message.sender_user_id WHERE m.id = ? LIMIT 1',
-            [$messageId]
-        );
-
-        if (!$message) {
-            return null;
-        }
-
-        return [
-            'id' => (int) $message['id'],
-            'sender' => (string) ($message['sender_name'] ?? 'Usuario'),
-            'content' => (string) ($message['body'] ?? ''),
-            'timestamp' => (string) ($message['created_at'] ?? ''),
-            'isOwn' => (int) ($message['sender_user_id'] ?? 0) === $currentUserId,
-            'attachments' => [],
-            'replyTo' => !empty($message['reply_to_message_id']) ? [
-                'id' => (int) $message['reply_to_message_id'],
-                'sender' => (string) ($message['reply_sender_name'] ?? 'Usuario'),
-                'content' => (string) ($message['reply_body'] ?? ''),
-            ] : null,
-        ];
+    if (!$message) {
+        return null;
     }
 
+    return [
+        'id' => (int) $message['id'],
+        'sender' => (string) ($message['sender_name'] ?? 'Usuario'),
+        'content' => (string) ($message['body'] ?? ''),
+        'timestamp' => (string) ($message['created_at'] ?? ''),
+        'isOwn' => (int) ($message['sender_user_id'] ?? 0) === $currentUserId,
+        'avatar_url' => $message['sender_avatar'] ?? null,
+        'attachments' => [],
+        'replyTo' => !empty($message['reply_to_message_id']) ? [
+            'id' => (int) $message['reply_to_message_id'],
+            'sender' => (string) ($message['reply_sender_name'] ?? 'Usuario'),
+            'content' => (string) ($message['reply_body'] ?? ''),
+        ] : null,
+    ];
+}
     private function fetchMessageById(int $messageId, int $conversationId): ?array
     {
         return $this->fetchOne(

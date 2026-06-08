@@ -1,5 +1,13 @@
 [
     {
+        "id": 1780274000296,
+        "careerCode": "IDGS",
+        "plan": "plan-normal",
+        "cuatrimestre": 10,
+        "groupNumber": 1,
+        "name": "IDGS10-1"
+    },
+    {
         "id": 1780274000295,
         "careerCode": "OLCE",
         "plan": "nuevo-modelo",
