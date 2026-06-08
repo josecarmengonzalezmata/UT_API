@@ -68,6 +68,11 @@ final class Api
             return;
         }
 
+        if ($first === 'users' && $method === 'GET' && isset($segments[1]) && is_numeric($segments[1]) && ($segments[2] ?? '') === 'avatar') {
+            $this->streamUserAvatar((int) $segments[1]);
+            return;
+        }
+
         if ($first === 'groups') {
             // public listing: if query contains career_code/cuatrimestre/cycle_id, read from DB
             if ($method === 'GET' && count($segments) === 1) {
@@ -98,19 +103,78 @@ final class Api
                     }
                     $sql .= ' ORDER BY g.group_number';
                     $rows = $this->fetchAll($sql, $params);
-                    // normalize group_code to use hyphen instead of underscore
-                    foreach ($rows as &$r) {
-                        if (isset($r['group_code'])) {
-                            $r['group_code'] = str_replace('_', '-', (string)$r['group_code']);
+                    foreach ($rows as &$row) {
+                        if (isset($row['group_code'])) {
+                            $row['group_code'] = str_replace('_', '-', (string) $row['group_code']);
                         }
                     }
-                    unset($r);
-                    Response::json(['data' => $rows]);
+                    unset($row);
+
+                    $storedGroups = array_values(array_filter(
+                        $this->loadGroups(),
+                        static function (array $group) use ($careerCode, $cuatrimestre): bool {
+                            if ($careerCode && strtoupper((string) ($group['careerCode'] ?? '')) !== strtoupper((string) $careerCode)) {
+                                return false;
+                            }
+
+                            if ($cuatrimestre && (int) ($group['cuatrimestre'] ?? 0) !== $cuatrimestre) {
+                                return false;
+                            }
+
+                            return true;
+                        }
+                    ));
+
+                    $this->syncStoredGroupsToDatabase($storedGroups);
+
+                    foreach ($storedGroups as &$group) {
+                        $group['group_code'] = str_replace('_', '-', (string) ($group['group_code'] ?? $group['name'] ?? ''));
+                        $group['group_number'] = (int) ($group['groupNumber'] ?? $group['group_number'] ?? 0);
+                    }
+                    unset($group);
+
+                    $merged = [];
+                    foreach (array_merge($rows, $storedGroups) as $group) {
+                        $groupCode = strtoupper(str_replace('_', '-', (string) ($group['group_code'] ?? $group['name'] ?? '')));
+                        if ($groupCode === '') {
+                            $groupCode = 'GROUP-' . (string) ($group['id'] ?? count($merged) + 1);
+                        }
+
+                        if (!isset($merged[$groupCode])) {
+                            $merged[$groupCode] = $group;
+                        }
+                    }
+
+                    Response::json(['data' => array_values($merged)]);
                     return;
                 }
 
-                // storage-backed groups (JSON) are returned as-is
-                Response::json(['data' => $this->loadGroups()]);
+                $storedGroups = $this->loadGroups();
+                $this->syncStoredGroupsToDatabase($storedGroups);
+
+                $dbGroups = $this->fetchAll('SELECT g.id, g.career_id, g.cycle_id, g.cuatrimestre, g.group_number, g.group_code, c.code AS career_code FROM groups g JOIN careers c ON c.id = g.career_id ORDER BY g.group_code');
+                foreach ($dbGroups as &$row) {
+                    $row['careerCode'] = strtoupper((string) ($row['career_code'] ?? ''));
+                    $row['plan'] = $this->planFromCareerId((int) ($row['career_id'] ?? 0));
+                    $row['groupNumber'] = (int) ($row['group_number'] ?? 0);
+                    $row['name'] = str_replace('_', '-', (string) ($row['group_code'] ?? ''));
+                    $row['group_code'] = str_replace('_', '-', (string) ($row['group_code'] ?? ''));
+                }
+                unset($row);
+
+                $merged = [];
+                foreach (array_merge($dbGroups, $storedGroups) as $group) {
+                    $groupCode = strtoupper(str_replace('_', '-', (string) ($group['group_code'] ?? $group['name'] ?? '')));
+                    if ($groupCode === '') {
+                        $groupCode = 'GROUP-' . (string) ($group['id'] ?? count($merged) + 1);
+                    }
+
+                    if (!isset($merged[$groupCode])) {
+                        $merged[$groupCode] = $group;
+                    }
+                }
+
+                Response::json(['data' => array_values($merged)]);
                 return;
             }
 
@@ -153,6 +217,7 @@ final class Api
                 ];
                 array_unshift($groups, $g);
                 $this->saveGroups($groups);
+                $this->syncDatabaseGroup($g);
                 Response::json(['data' => $g], 201);
             }
 
@@ -166,28 +231,46 @@ final class Api
                 $data = $this->body();
                 $groups = $this->loadGroups();
                 $found = false;
+                $updatedGroup = null;
+                $previousGroup = null;
                 foreach ($groups as &$g) {
                     if ((int)$g['id'] === $id) {
                         $found = true;
+                        $previousGroup = $g;
                         if (isset($data['careerCode'])) $g['careerCode'] = strtoupper((string)$data['careerCode']);
                         if (isset($data['plan'])) $g['plan'] = (string)$data['plan'];
                         if (isset($data['cuatrimestre'])) $g['cuatrimestre'] = (int)$data['cuatrimestre'];
                         if (isset($data['groupNumber'])) $g['groupNumber'] = (int)$data['groupNumber'];
                         $g['name'] = $g['careerCode'] . $g['cuatrimestre'] . '-' . $g['groupNumber'];
+                        $updatedGroup = $g;
                         break;
                     }
                 }
                 unset($g);
                 if (!$found) Response::error('Not found', 404);
                 $this->saveGroups($groups);
-                foreach ($groups as $g) if ((int)$g['id'] === $id) Response::json(['data' => $g]);
+                if (is_array($updatedGroup) && is_array($previousGroup)) {
+                    $this->syncDatabaseGroup($updatedGroup, $previousGroup);
+                }
+                foreach ($groups as $group) if ((int)$group['id'] === $id) Response::json(['data' => $group]);
             }
 
             // delete
             if ($method === 'DELETE') {
                 $groups = $this->loadGroups();
+                $deletedGroup = null;
+                foreach ($groups as $group) {
+                    if ((int) $group['id'] === $id) {
+                        $deletedGroup = $group;
+                        break;
+                    }
+                }
+
                 $next = array_values(array_filter($groups, static fn($g) => (int)$g['id'] !== $id));
                 $this->saveGroups($next);
+                if (is_array($deletedGroup)) {
+                    $this->deleteDatabaseGroup($deletedGroup);
+                }
                 Response::json(['data' => null]);
             }
 
@@ -352,6 +435,124 @@ if (($method === 'POST' || $method === 'PATCH' || $method === 'PUT') && $action 
             return;
         }
 
+        if (($method === 'PATCH' || $method === 'PUT') && count($segments) === 2 && is_numeric($segments[1])) {
+            $this->requireAnyRole($user, ['administrador']);
+
+            $formId = (int) $segments[1];
+            $data = $this->body();
+
+            $currentForm = $this->fetchOne('SELECT * FROM forms WHERE id = ?', [$formId]);
+            if (!$currentForm) {
+                Response::error('Form not found', 404);
+            }
+
+            $currentRule = $this->fetchOne('SELECT * FROM form_access_rules WHERE form_id = ? LIMIT 1', [$formId]);
+
+            $allowedRoles = ['docente', 'tutor'];
+            if (array_key_exists('access_roles', $data) && !is_array($data['access_roles'])) {
+                Response::error('access_roles must be an array', 422);
+            }
+
+            $updateFormFields = [];
+            $updateParams = [];
+            foreach (['title', 'section', 'description', 'is_active'] as $field) {
+                if (array_key_exists($field, $data)) {
+                    $updateFormFields[] = $field . ' = ?';
+                    $updateParams[] = $field === 'is_active'
+                        ? (int) (bool) $data[$field]
+                        : $data[$field];
+                }
+            }
+
+            if ($updateFormFields) {
+                $updateParams[] = $formId;
+                $statement = $pdo->prepare('UPDATE forms SET ' . implode(', ', $updateFormFields) . ' WHERE id = ?');
+                $statement->execute($updateParams);
+            }
+
+            if (array_key_exists('due_at', $data) || array_key_exists('access_roles', $data)) {
+                if (!$currentRule) {
+                    $pdo->prepare('INSERT INTO form_access_rules (form_id, due_at, updated_by) VALUES (?, ?, ?)')
+                        ->execute([
+                            $formId,
+                            null,
+                            $user['id'],
+                        ]);
+                    $currentRule = $this->fetchOne('SELECT * FROM form_access_rules WHERE form_id = ? LIMIT 1', [$formId]);
+                }
+
+                if (array_key_exists('due_at', $data)) {
+                    $dueAt = $data['due_at'];
+                    if ($dueAt === '' || $dueAt === null) {
+                        $dueAt = null;
+                    }
+
+                    $pdo->prepare('UPDATE form_access_rules SET due_at = ?, updated_by = ? WHERE form_id = ?')
+                        ->execute([
+                            $dueAt,
+                            $user['id'],
+                            $formId,
+                        ]);
+                } else {
+                    $pdo->prepare('UPDATE form_access_rules SET updated_by = ? WHERE form_id = ?')
+                        ->execute([$user['id'], $formId]);
+                }
+
+                if (array_key_exists('access_roles', $data)) {
+                    $roleCodes = array_values(array_intersect($allowedRoles, array_map(static fn($role) => (string) $role, $data['access_roles'])));
+                    $roleIds = [];
+                    if ($roleCodes) {
+                        $placeholders = implode(', ', array_fill(0, count($roleCodes), '?'));
+                        $roleRows = $this->fetchAll('SELECT id, code FROM roles WHERE code IN (' . $placeholders . ') ORDER BY code', $roleCodes);
+                        foreach ($roleRows as $row) {
+                            $roleIds[] = (int) $row['id'];
+                        }
+                    }
+
+                    $ruleId = (int) ($currentRule['id'] ?? $this->scalar('SELECT id FROM form_access_rules WHERE form_id = ? LIMIT 1', [$formId]));
+                    $pdo->prepare('DELETE FROM form_access_roles WHERE form_access_rule_id = ?')->execute([$ruleId]);
+
+                    if ($roleIds) {
+                        $insertRole = $pdo->prepare('INSERT INTO form_access_roles (form_access_rule_id, role_id) VALUES (?, ?)');
+                        foreach ($roleIds as $roleId) {
+                            $insertRole->execute([$ruleId, $roleId]);
+                        }
+                    }
+                }
+            }
+
+            $updatedRows = $this->fetchAll(
+                'SELECT f.id, f.form_code, f.title, f.section, f.description, f.is_active, far.due_at, r.code AS role_code
+                 FROM forms f
+                 LEFT JOIN form_access_rules far ON far.form_id = f.id
+                 LEFT JOIN form_access_roles faro ON faro.form_access_rule_id = far.id
+                 LEFT JOIN roles r ON r.id = faro.role_id
+                 WHERE f.id = ?
+                 ORDER BY r.code',
+                [$formId]
+            );
+
+            $updatedForm = [
+                'id' => $formId,
+                'form_code' => $updatedRows[0]['form_code'] ?? $currentForm['form_code'],
+                'title' => $updatedRows[0]['title'] ?? $currentForm['title'],
+                'section' => $updatedRows[0]['section'] ?? $currentForm['section'],
+                'description' => $updatedRows[0]['description'] ?? $currentForm['description'],
+                'is_active' => (bool) ($updatedRows[0]['is_active'] ?? $currentForm['is_active']),
+                'due_at' => $updatedRows[0]['due_at'] ?? null,
+                'access_roles' => [],
+            ];
+
+            foreach ($updatedRows as $row) {
+                if (!empty($row['role_code']) && !in_array($row['role_code'], $updatedForm['access_roles'], true)) {
+                    $updatedForm['access_roles'][] = $row['role_code'];
+                }
+            }
+
+            Response::json(['data' => $updatedForm]);
+            return;
+        }
+
         Response::error('Method not allowed', 405);
     }
 
@@ -366,6 +567,8 @@ if (($method === 'POST' || $method === 'PATCH' || $method === 'PUT') && $action 
 
         if ($method === 'POST' && count($segments) === 1) {
             $data = $this->body();
+            @file_put_contents(__DIR__ . '/../storage/logs/upload_debug.log', "[" . date('c') . "] POST /documents body keys: " . print_r(array_keys((array)$data), true) . "\n", FILE_APPEND);
+            @file_put_contents(__DIR__ . '/../storage/logs/upload_debug.log', "[" . date('c') . "] POST /documents body keys: " . print_r(array_keys((array)$data), true) . "\n", FILE_APPEND);
             $this->validateRequired($data, ['name', 'year', 'period_name', 'start_date', 'end_date', 'status']);
 
             $pdo->beginTransaction();
@@ -662,27 +865,149 @@ if (($method === 'POST' || $method === 'PATCH' || $method === 'PUT') && $action 
         if ($method === 'POST' && count($segments) === 1) {
             $data = $this->body();
             $this->validateRequired($data, ['form_id', 'title']);
+            $originalDocumentId = isset($data['original_document_id']) ? (int) $data['original_document_id'] : 0;
 
-            if (!isset($_FILES['file']) || ($_FILES['file']['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) {
+            $existingDocument = null;
+            if ($originalDocumentId > 0) {
+                $existingDocument = $this->fetchOne('SELECT * FROM documents WHERE id = ?', [$originalDocumentId]);
+                if (!$existingDocument) {
+                    Response::error('Original document not found', 404);
+                }
+                if ((int) $existingDocument['uploaded_by'] !== (int) $user['id']) {
+                    Response::error('No permission to update this document', 403);
+                }
+            }
+
+            // Check for PHP upload errors (size exceeded, etc)
+            if (isset($_FILES['file']['error']) && $_FILES['file']['error'] !== UPLOAD_ERR_OK) {
+                $errorCode = $_FILES['file']['error'];
+                $errorMsg = 'Unknown upload error';
+                if ($errorCode === UPLOAD_ERR_INI_SIZE || $errorCode === UPLOAD_ERR_FORM_SIZE) {
+                    $errorMsg = 'File size exceeds limit. upload_max_filesize=' . ini_get('upload_max_filesize') . ', post_max_size=' . ini_get('post_max_size');
+                } elseif ($errorCode === UPLOAD_ERR_PARTIAL) {
+                    $errorMsg = 'File upload incomplete';
+                } elseif ($errorCode === UPLOAD_ERR_NO_TMP_DIR) {
+                    $errorMsg = 'No temporary directory available';
+                } elseif ($errorCode === UPLOAD_ERR_CANT_WRITE) {
+                    $errorMsg = 'Cannot write to upload directory';
+                }
+                Response::error($errorMsg, 422);
+            }
+
+            $hasFile = (isset($_FILES['file']) && ($_FILES['file']['error'] ?? UPLOAD_ERR_NO_FILE) === UPLOAD_ERR_OK) || (!empty($data['file_base64'] ?? ''));
+            if (!$hasFile && !$existingDocument) {
                 Response::error('PDF file is required', 422);
             }
 
             $formId = (int) $data['form_id'];
-            $uploadDir = __DIR__ . '/../storage/uploads/documents/' . date('Y/m');
-            if (!is_dir($uploadDir) && !mkdir($uploadDir, 0777, true) && !is_dir($uploadDir)) {
-                Response::error('Unable to create upload directory', 500);
+            $relativePath = $existingDocument['file_path'] ?? null;
+            $mimeType = $existingDocument['mime_type'] ?? null;
+            $fileSizeBytes = $existingDocument['file_size_bytes'] ?? null;
+
+            if ($hasFile) {
+                $uploadDir = __DIR__ . '/../storage/uploads/documents/' . date('Y/m');
+                if (!is_dir($uploadDir) && !mkdir($uploadDir, 0777, true) && !is_dir($uploadDir)) {
+                    Response::error('Unable to create upload directory', 500);
+                }
+
+                if (!is_writable($uploadDir)) {
+                    @chmod($uploadDir, 0777);
+                }
+
+                $tmpName = $_FILES['file']['tmp_name'] ?? '';
+                $originalName = basename((string) ($_FILES['file']['name'] ?? ($data['file_name'] ?? 'upload.pdf')));
+                $safeName = preg_replace('/[^A-Za-z0-9._-]/', '_', $originalName);
+                $storedName = uniqid('doc_', true) . '_' . $safeName;
+                $storedPath = $uploadDir . '/' . $storedName;
+
+                if (!empty($data['file_base64'])) {
+                    $decoded = base64_decode($data['file_base64']);
+                    if ($decoded === false) {
+                        Response::error('Invalid base64 file data', 400);
+                    }
+                    if (strlen($decoded) > 5 * 1024 * 1024) {
+                        Response::error('File exceeds 5MB limit', 422);
+                    }
+                    if (@file_put_contents($storedPath, $decoded) === false) {
+                        Response::error('Unable to save decoded file', 500);
+                    }
+                    $mimeType = $data['file_type'] ?? (function_exists('mime_content_type') ? mime_content_type($storedPath) : 'application/octet-stream');
+                    $fileSizeBytes = strlen($decoded);
+                } else {
+                    if (!is_uploaded_file($tmpName)) {
+                        @file_put_contents(__DIR__ . '/../storage/logs/upload_debug.log', "[" . date('c') . "] is_uploaded_file failed for tmp=" . var_export($tmpName, true) . "\n" . print_r(
+                            [
+                                '_FILES' => $_FILES,
+                                'post_max_size' => ini_get('post_max_size'),
+                                'upload_max_filesize' => ini_get('upload_max_filesize'),
+                                'REQUEST_CONTENT_LENGTH' => $_SERVER['CONTENT_LENGTH'] ?? 'not set',
+                            ],
+                            true
+                        ) . "\n", FILE_APPEND);
+
+                        if (empty($tmpName)) {
+                            Response::error('File upload failed: no temporary file. Check file size vs post_max_size (' . ini_get('post_max_size') . ') and upload_max_filesize (' . ini_get('upload_max_filesize') . ')', 500);
+                        }
+
+                        Response::error('Uploaded file missing or invalid (is_uploaded_file failed)', 500);
+                    }
+
+                    $moved = @move_uploaded_file($tmpName, $storedPath);
+                    if (!$moved) {
+                        if (@copy($tmpName, $storedPath)) {
+                            @unlink($tmpName);
+                        } else {
+                            $errCode = $_FILES['file']['error'] ?? 'unknown';
+                            Response::error('Unable to save uploaded file (move_failed). tmp=' . $tmpName . ' err=' . $errCode, 500);
+                        }
+                    }
+
+                    $mimeType = $_FILES['file']['type'] ?? null;
+                    $fileSizeBytes = (int) ($_FILES['file']['size'] ?? 0);
+                }
+
+                if ($existingDocument && !empty($existingDocument['file_path'])) {
+                    $previousPath = __DIR__ . '/../' . $existingDocument['file_path'];
+                    if (is_file($previousPath)) {
+                        @unlink($previousPath);
+                    }
+                }
+
+                $relativePath = 'storage/uploads/documents/' . date('Y/m') . '/' . $storedName;
             }
 
-            $originalName = basename((string) $_FILES['file']['name']);
-            $safeName = preg_replace('/[^A-Za-z0-9._-]/', '_', $originalName);
-            $storedName = uniqid('doc_', true) . '_' . $safeName;
-            $storedPath = $uploadDir . '/' . $storedName;
-
-            if (!move_uploaded_file($_FILES['file']['tmp_name'], $storedPath)) {
-                Response::error('Unable to save uploaded file', 500);
+            $resolvedGroupId = $this->resolveDocumentGroupId($data, $existingDocument['group_id'] ?? null);
+            if (($data['group_id'] ?? null) !== null || ($data['group_code'] ?? null) !== null) {
+                if ($resolvedGroupId === null) {
+                    Response::error('Invalid group selected', 422);
+                }
             }
 
-            $relativePath = 'storage/uploads/documents/' . date('Y/m') . '/' . $storedName;
+            if ($existingDocument) {
+                $statement = $pdo->prepare('UPDATE documents SET form_id = ?, cycle_id = ?, title = ?, apartado_label = ?, plan = ?, carrera_label = ?, materia = ?, parcial = ?, group_id = ?, file_path = ?, mime_type = ?, file_size_bytes = ?, status = ?, submitted_at = NOW() WHERE id = ?');
+                $statement->execute([
+                    $formId,
+                    $data['cycle_id'] ?? $existingDocument['cycle_id'],
+                    $data['title'],
+                    $data['apartado_label'] ?? $existingDocument['apartado_label'],
+                    $data['plan'] ?? $existingDocument['plan'],
+                    $data['carrera_label'] ?? $existingDocument['carrera_label'],
+                    $data['materia'] ?? $existingDocument['materia'],
+                    $data['parcial'] ?? $existingDocument['parcial'],
+                    $resolvedGroupId,
+                    $relativePath,
+                    $mimeType,
+                    $fileSizeBytes,
+                    'pendiente',
+                    $originalDocumentId,
+                ]);
+
+                $pdo->prepare('INSERT INTO document_status_history (document_id, action, action_by, notes) VALUES (?, ?, ?, ?)')
+                    ->execute([$originalDocumentId, 'actualizado', $user['id'], 'Documento actualizado desde la API']);
+
+                Response::json(['data' => $this->fetchOne('SELECT * FROM documents WHERE id = ?', [$originalDocumentId])], 200);
+            }
+
             $statement = $pdo->prepare('INSERT INTO documents (form_id, cycle_id, uploaded_by, assigned_reviewer_id, title, apartado_label, plan, carrera_label, materia, parcial, group_id, file_path, mime_type, file_size_bytes, status, submitted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())');
             $statement->execute([
                 $formId,
@@ -695,10 +1020,10 @@ if (($method === 'POST' || $method === 'PATCH' || $method === 'PUT') && $action 
                 $data['carrera_label'] ?? null,
                 $data['materia'] ?? null,
                 $data['parcial'] ?? null,
-                $data['group_id'] ?? null,
+                $resolvedGroupId,
                 $relativePath,
-                $_FILES['file']['type'] ?? null,
-                (int) ($_FILES['file']['size'] ?? 0),
+                $mimeType ?? null,
+                (int) ($fileSizeBytes ?? 0),
                 'pendiente',
             ]);
 
@@ -727,6 +1052,13 @@ if (($method === 'POST' || $method === 'PATCH' || $method === 'PUT') && $action 
             header('Content-Type: ' . $mime);
             header('Content-Length: ' . filesize($fullPath));
             header('Content-Disposition: attachment; filename="' . basename($doc['file_path']) . '"');
+            header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+            header('Pragma: no-cache');
+            header('Access-Control-Allow-Origin: ' . Config::allowedFrontendOrigin());
+            header('Access-Control-Allow-Credentials: true');
+            header('Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, ngrok-skip-browser-warning');
+            header('Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS');
+            header('Access-Control-Expose-Headers: Content-Disposition, Content-Type');
             readfile($fullPath);
             exit;
         }
@@ -840,7 +1172,6 @@ if (($method === 'POST' || $method === 'PATCH' || $method === 'PUT') && $action 
             }
 
             $pair = [$roleA, $roleB];
-            sort($pair);
             if ($pair !== ['administrador', 'docente']) {
                 Response::error('Pareja de roles no permitida para conversaciones', 422);
             }
@@ -849,32 +1180,6 @@ if (($method === 'POST' || $method === 'PATCH' || $method === 'PUT') && $action 
             if ($existingId !== null) {
                 Response::json(['data' => $this->formatConversation($existingId, $currentUserId)]);
             }
-
-            $conversationId = $this->createDirectConversation($participants[0], $participants[1]);
-            Response::json(['data' => $this->formatConversation($conversationId, $currentUserId)], 201);
-        }
-
-        $conversationId = isset($segments[1]) ? (int) $segments[1] : 0;
-        if ($conversationId <= 0) {
-            Response::error('Invalid conversation id', 422);
-        }
-
-        if (($segments[2] ?? '') === 'messages' && $method === 'GET') {
-            $this->requireConversationAccess($conversationId, $currentUserId);
-            Response::json(['data' => $this->fetchConversationMessages($conversationId, $currentUserId)]);
-        }
-
-        if (($segments[2] ?? '') === 'messages' && $method === 'POST') {
-            $data = $this->body();
-            $this->validateRequired($data, ['body']);
-            $this->requireConversationAccess($conversationId, $currentUserId);
-            $statement = $pdo->prepare('INSERT INTO messages (conversation_id, sender_user_id, body, reply_to_message_id) VALUES (?, ?, ?, ?)');
-            $statement->execute([$conversationId, $currentUserId, $data['body'], $data['reply_to_message_id'] ?? null]);
-
-            $pdo->prepare('UPDATE conversations SET updated_at = NOW() WHERE id = ?')->execute([$conversationId]);
-            $pdo->prepare('UPDATE conversation_participants SET unread_count = unread_count + 1 WHERE conversation_id = ? AND user_id <> ?')->execute([$conversationId, $currentUserId]);
-
-            Response::json(['data' => $this->fetchConversationMessageById((int) $pdo->lastInsertId(), $currentUserId)], 201);
         }
 
         if (($segments[2] ?? '') === 'messages' && isset($segments[3]) && is_numeric($segments[3])) {
@@ -1420,12 +1725,69 @@ private function fetchConversationMessageById(int $messageId, int $currentUserId
         return $initials !== '' ? $initials : 'CH';
     }
 
+    private function publicAvatarUrl(array $user): ?string
+    {
+        if (!isset($user['id'])) {
+            return $user['avatar_url'] ?? null;
+        }
+
+        return !empty($user['avatar_url']) ? '/api/users/' . (int) $user['id'] . '/avatar' : null;
+    }
+
+    private function streamUserAvatar(int $userId): void
+    {
+        $user = $this->fetchOne('SELECT id, full_name, avatar_url FROM users WHERE id = ?', [$userId]);
+        if (!$user) {
+            Response::error('User not found', 404);
+        }
+
+        $avatarDir = __DIR__ . '/../public/uploads/avatars';
+        $avatarFile = null;
+
+        $matches = glob($avatarDir . '/avatar_' . $userId . '_*');
+        if (is_array($matches) && $matches !== []) {
+            usort($matches, static function (string $left, string $right): int {
+                return filemtime($right) <=> filemtime($left);
+            });
+            $avatarFile = $matches[0];
+        }
+
+        if ($avatarFile === null && !empty($user['avatar_url']) && str_starts_with((string) $user['avatar_url'], '/uploads/avatars/')) {
+            $fallbackPath = __DIR__ . '/../public' . $user['avatar_url'];
+            if (is_file($fallbackPath)) {
+                $avatarFile = $fallbackPath;
+            }
+        }
+
+        if ($avatarFile === null || !is_file($avatarFile)) {
+            Response::error('Avatar not found', 404);
+        }
+
+        $extension = strtolower(pathinfo($avatarFile, PATHINFO_EXTENSION));
+        $mimeType = match ($extension) {
+            'jpg', 'jpeg' => 'image/jpeg',
+            'png' => 'image/png',
+            'gif' => 'image/gif',
+            'webp' => 'image/webp',
+            default => (function_exists('mime_content_type') ? mime_content_type($avatarFile) : 'application/octet-stream'),
+        };
+
+        header('Content-Type: ' . $mimeType);
+        header('Content-Length: ' . filesize($avatarFile));
+        header('Cache-Control: private, max-age=300');
+        header('Access-Control-Allow-Origin: ' . Config::allowedFrontendOrigin());
+        header('Access-Control-Allow-Credentials: true');
+        readfile($avatarFile);
+        exit;
+    }
+
     private function getUsersWithRoles(): array
     {
         $users = $this->fetchAll(
             "SELECT id, full_name, email, phone, area, avatar_url, is_active, created_at, updated_at, (SELECT COUNT(*) FROM documents d WHERE d.uploaded_by = users.id) AS documents_count FROM users WHERE email NOT IN ('docente1@utslrc.edu.mx', 'tutor1@utslrc.edu.mx') ORDER BY full_name"
         );
         foreach ($users as &$user) {
+            $user['avatar_url'] = $this->publicAvatarUrl($user);
             $user['roles'] = array_map(static fn (array $role): array => ['id' => (int) $role['id'], 'code' => $role['code'], 'name' => $role['name']], $this->getRolesByUserId((int) $user['id']));
         }
 
@@ -1439,6 +1801,7 @@ private function fetchConversationMessageById(int $messageId, int $currentUserId
             return null;
         }
 
+        $user['avatar_url'] = $this->publicAvatarUrl($user);
         $user['roles'] = array_map(static fn (array $role): array => ['id' => (int) $role['id'], 'code' => $role['code'], 'name' => $role['name']], $this->getRolesByUserId($userId));
 
         return $user;
@@ -1540,6 +1903,208 @@ private function fetchConversationMessageById(int $messageId, int $currentUserId
         file_put_contents($path, json_encode(array_values($groups), JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
     }
 
+    private function buildGroupCode(array $group): string
+    {
+        $careerCode = strtoupper(trim((string) ($group['careerCode'] ?? '')));
+        $cuatrimestre = (int) ($group['cuatrimestre'] ?? 0);
+        $groupNumber = (int) ($group['groupNumber'] ?? 0);
+
+        return $careerCode !== '' && $cuatrimestre > 0 && $groupNumber > 0
+            ? $careerCode . $cuatrimestre . '-' . $groupNumber
+            : strtoupper(trim((string) ($group['group_code'] ?? $group['name'] ?? '')));
+    }
+
+    private function resolveCareerIdForGroup(array $group): ?int
+    {
+        $careerCode = strtoupper(trim((string) ($group['careerCode'] ?? '')));
+        $plan = strtolower(trim((string) ($group['plan'] ?? '')));
+        $cuatrimestre = (int) ($group['cuatrimestre'] ?? 0);
+
+        if ($careerCode === '') {
+            return null;
+        }
+
+        if ($plan === 'nuevo-modelo') {
+            $plan = 'nuevo_modelo';
+        } elseif ($plan === 'plan-normal') {
+            $plan = 'plan_normal';
+        }
+
+        $level = null;
+        if ($plan === 'nuevo_modelo') {
+            $level = $cuatrimestre > 0 && $cuatrimestre <= 6 ? 'TSU' : 'Ingenieria';
+        } elseif ($plan === 'plan_normal') {
+            $level = 'Ingenieria';
+        }
+
+        $pdo = Database::pdo();
+
+        if ($level !== null) {
+            $statement = $pdo->prepare('SELECT id FROM careers WHERE code = ? AND plan = ? AND level = ? LIMIT 1');
+            $statement->execute([$careerCode, $plan, $level]);
+            $careerId = $statement->fetchColumn();
+            if ($careerId !== false) {
+                return (int) $careerId;
+            }
+
+            $statement = $pdo->prepare('INSERT INTO careers (code, name, plan, level) VALUES (?, ?, ?, ?)');
+            $statement->execute([
+                $careerCode,
+                $careerCode,
+                $plan,
+                $level,
+            ]);
+
+            return (int) $pdo->lastInsertId();
+        }
+
+        $statement = $pdo->prepare('SELECT id FROM careers WHERE code = ? AND plan = ? ORDER BY id LIMIT 1');
+        $statement->execute([$careerCode, $plan]);
+        $careerId = $statement->fetchColumn();
+
+        if ($careerId !== false) {
+            return (int) $careerId;
+        }
+
+        $statement = $pdo->prepare('INSERT INTO careers (code, name, plan, level) VALUES (?, ?, ?, ?)');
+        $statement->execute([
+            $careerCode,
+            $careerCode,
+            $plan,
+            'Ingenieria',
+        ]);
+
+        return (int) $pdo->lastInsertId();
+    }
+
+    private function planFromCareerId(int $careerId): string
+    {
+        if ($careerId <= 0) {
+            return 'plan_normal';
+        }
+
+        $statement = Database::pdo()->prepare('SELECT plan FROM careers WHERE id = ? LIMIT 1');
+        $statement->execute([$careerId]);
+        $plan = (string) ($statement->fetchColumn() ?: 'plan_normal');
+
+        return $plan === 'nuevo_modelo' ? 'nuevo-modelo' : 'plan-normal';
+    }
+
+    private function syncDatabaseGroup(array $group, ?array $previousGroup = null): void
+    {
+        $groupCode = $this->buildGroupCode($group);
+        if ($groupCode === '') {
+            return;
+        }
+
+        $pdo = Database::pdo();
+        $careerId = $this->resolveCareerIdForGroup($group);
+        $cycleId = (int) ($this->scalar("SELECT id FROM academic_cycles WHERE status = 'activo' ORDER BY id DESC LIMIT 1") ?? 0);
+        $cycleId = $cycleId > 0 ? $cycleId : null;
+        $cuatrimestre = (int) ($group['cuatrimestre'] ?? 0);
+        $groupNumber = (int) ($group['groupNumber'] ?? 0);
+
+        $existingId = null;
+        if ($previousGroup !== null) {
+            $previousCode = $this->buildGroupCode($previousGroup);
+            if ($previousCode !== '') {
+                $statement = $pdo->prepare('SELECT id FROM academic_groups WHERE group_code = ? LIMIT 1');
+                $statement->execute([$previousCode]);
+                $existingId = $statement->fetchColumn();
+                if ($existingId === false) {
+                    $existingId = null;
+                }
+            }
+        }
+
+        if ($existingId === null) {
+            $statement = $pdo->prepare('SELECT id FROM groups WHERE group_code = ? LIMIT 1');
+            $statement->execute([$groupCode]);
+            $existingId = $statement->fetchColumn();
+            if ($existingId === false) {
+                $existingId = null;
+            }
+        }
+
+        if ($existingId === null) {
+            $statement = $pdo->prepare('SELECT id FROM groups WHERE career_id = ? AND cuatrimestre = ? AND group_number = ? LIMIT 1');
+            $statement->execute([$careerId, $cuatrimestre, $groupNumber]);
+            $existingId = $statement->fetchColumn();
+            if ($existingId === false) {
+                $existingId = null;
+            }
+        }
+
+        if ($existingId !== null) {
+            $statement = $pdo->prepare('UPDATE groups SET career_id = ?, cycle_id = ?, cuatrimestre = ?, group_number = ?, group_code = ? WHERE id = ?');
+            $statement->execute([
+                $careerId,
+                $cycleId,
+                $cuatrimestre,
+                $groupNumber,
+                $groupCode,
+                (int) $existingId,
+            ]);
+            return;
+        }
+
+        $statement = $pdo->prepare('INSERT INTO groups (career_id, cycle_id, cuatrimestre, group_number, group_code) VALUES (?, ?, ?, ?, ?)');
+        $statement->execute([
+            $careerId,
+            $cycleId,
+            $cuatrimestre,
+            $groupNumber,
+            $groupCode,
+        ]);
+    }
+
+    private function syncStoredGroupsToDatabase(array $groups): void
+    {
+        foreach ($groups as $group) {
+            if (is_array($group)) {
+                $this->syncDatabaseGroup($group);
+            }
+        }
+    }
+
+    private function deleteDatabaseGroup(array $group): void
+    {
+        $groupCode = $this->buildGroupCode($group);
+        if ($groupCode === '') {
+            return;
+        }
+
+        $statement = Database::pdo()->prepare('DELETE FROM groups WHERE group_code = ?');
+        $statement->execute([$groupCode]);
+    }
+
+    private function resolveDocumentGroupId(array $data, mixed $fallbackGroupId = null): ?int
+    {
+        $pdo = Database::pdo();
+
+        $groupId = isset($data['group_id']) ? (int) $data['group_id'] : (int) ($fallbackGroupId ?? 0);
+        if ($groupId > 0) {
+            $statement = $pdo->prepare('SELECT id FROM groups WHERE id = ? LIMIT 1');
+            $statement->execute([$groupId]);
+            $resolvedId = $statement->fetchColumn();
+            if ($resolvedId !== false) {
+                return (int) $resolvedId;
+            }
+        }
+
+        $groupCode = strtoupper(str_replace('_', '-', trim((string) ($data['group_code'] ?? ''))));
+        if ($groupCode !== '') {
+            $statement = $pdo->prepare('SELECT id FROM groups WHERE REPLACE(UPPER(group_code), "_", "-") = ? LIMIT 1');
+            $statement->execute([$groupCode]);
+            $resolvedId = $statement->fetchColumn();
+            if ($resolvedId !== false) {
+                return (int) $resolvedId;
+            }
+        }
+
+        return null;
+    }
+
     private function scalar(string $sql, array $params = []): mixed
     {
         $statement = Database::pdo()->prepare($sql);
@@ -1586,7 +2151,7 @@ private function fetchConversationMessageById(int $messageId, int $currentUserId
                 Response::error('No se pudo guardar el avatar', 500);
             }
 
-            $avatarUrl = '/uploads/avatars/' . $storedName;
+            $avatarUrl = '/api/users/' . (int) $user['id'] . '/avatar';
         }
 
         $pdo = Database::pdo();

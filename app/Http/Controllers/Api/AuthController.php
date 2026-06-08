@@ -21,6 +21,19 @@ class AuthController extends Controller
         $firstNames = count($parts) <= 1 ? trim($user->full_name) : implode(' ', array_slice($parts, 0, -1));
         $lastNames = count($parts) <= 1 ? '' : (string) array_slice($parts, -1)[0];
 
+        // Asegurar que avatar_url sea una URL completa o null
+        $avatarUrl = $user->avatar_url;
+        if ($avatarUrl && !str_starts_with($avatarUrl, 'http')) {
+            if (str_starts_with($avatarUrl, '/storage/')) {
+                $avatarUrl = env('APP_URL') . $avatarUrl;
+            } elseif (str_starts_with($avatarUrl, '/uploads/')) {
+                // CORREGIR rutas antiguas
+                $avatarUrl = env('APP_URL') . str_replace('/uploads/', '/storage/', $avatarUrl);
+            } elseif (!str_starts_with($avatarUrl, '/')) {
+                $avatarUrl = env('APP_URL') . '/storage/' . $avatarUrl;
+            }
+        }
+
         return [
             'id' => $user->id,
             'full_name' => $user->full_name,
@@ -29,7 +42,7 @@ class AuthController extends Controller
             'email' => $user->email,
             'phone' => $user->phone,
             'area' => $user->area,
-            'avatar_url' => $user->avatar_url,
+            'avatar_url' => $avatarUrl,
             'is_active' => $user->is_active,
             'created_at' => $user->created_at?->toIso8601String(),
             'roles' => $user->roles()->pluck('code')->values(),
@@ -97,8 +110,18 @@ class AuthController extends Controller
         ]);
 
         if ($request->hasFile('avatar')) {
+            // Eliminar avatar anterior si existe
+            if ($user->avatar_url) {
+                $oldPath = str_replace('/storage/', '', parse_url($user->avatar_url, PHP_URL_PATH) ?: '');
+                if ($oldPath && Storage::disk('public')->exists($oldPath)) {
+                    Storage::disk('public')->delete($oldPath);
+                }
+            }
+            
+            // Guardar nuevo avatar
             $path = $request->file('avatar')->store('avatars', 'public');
-            $data['avatar_url'] = Storage::disk('public')->url($path);
+            // Guardar URL completa
+            $data['avatar_url'] = env('APP_URL') . '/storage/' . $path;
         }
 
         $user->fill([

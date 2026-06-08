@@ -1,5 +1,469 @@
 [
     {
+        "id": 1780274000356,
+        "careerCode": "IPB",
+        "plan": "plan-normal",
+        "cuatrimestre": 7,
+        "groupNumber": 3,
+        "name": "IPB7-3"
+    },
+    {
+        "id": 1780274000355,
+        "careerCode": "IPB",
+        "plan": "plan-normal",
+        "cuatrimestre": 7,
+        "groupNumber": 2,
+        "name": "IPB7-2"
+    },
+    {
+        "id": 1780274000354,
+        "careerCode": "IPB",
+        "plan": "plan-normal",
+        "cuatrimestre": 7,
+        "groupNumber": 1,
+        "name": "IPB7-1"
+    },
+    {
+        "id": 1780274000353,
+        "careerCode": "IDGS",
+        "plan": "plan-normal",
+        "cuatrimestre": 7,
+        "groupNumber": 3,
+        "name": "IDGS7-3"
+    },
+    {
+        "id": 1780274000352,
+        "careerCode": "IDGS",
+        "plan": "plan-normal",
+        "cuatrimestre": 7,
+        "groupNumber": 2,
+        "name": "IDGS7-2"
+    },
+    {
+        "id": 1780274000351,
+        "careerCode": "ILI",
+        "plan": "plan-normal",
+        "cuatrimestre": 7,
+        "groupNumber": 3,
+        "name": "ILI7-3"
+    },
+    {
+        "id": 1780274000350,
+        "careerCode": "ILI",
+        "plan": "plan-normal",
+        "cuatrimestre": 7,
+        "groupNumber": 2,
+        "name": "ILI7-2"
+    },
+    {
+        "id": 1780274000349,
+        "careerCode": "ILI",
+        "plan": "plan-normal",
+        "cuatrimestre": 7,
+        "groupNumber": 1,
+        "name": "ILI7-1"
+    },
+    {
+        "id": 1780274000348,
+        "careerCode": "IEMI",
+        "plan": "plan-normal",
+        "cuatrimestre": 7,
+        "groupNumber": 3,
+        "name": "IEMI7-3"
+    },
+    {
+        "id": 1780274000347,
+        "careerCode": "IEMI",
+        "plan": "plan-normal",
+        "cuatrimestre": 7,
+        "groupNumber": 2,
+        "name": "IEMI7-2"
+    },
+    {
+        "id": 1780274000346,
+        "careerCode": "IEMI",
+        "plan": "plan-normal",
+        "cuatrimestre": 7,
+        "groupNumber": 1,
+        "name": "IEMI7-1"
+    },
+    {
+        "id": 1780274000345,
+        "careerCode": "LIMN",
+        "plan": "plan-normal",
+        "cuatrimestre": 7,
+        "groupNumber": 3,
+        "name": "LIMN7-3"
+    },
+    {
+        "id": 1780274000344,
+        "careerCode": "LIMN",
+        "plan": "plan-normal",
+        "cuatrimestre": 7,
+        "groupNumber": 2,
+        "name": "LIMN7-2"
+    },
+    {
+        "id": 1780274000343,
+        "careerCode": "LIMN",
+        "plan": "plan-normal",
+        "cuatrimestre": 7,
+        "groupNumber": 1,
+        "name": "LIMN7-1"
+    },
+    {
+        "id": 1780274000342,
+        "careerCode": "IME",
+        "plan": "plan-normal",
+        "cuatrimestre": 7,
+        "groupNumber": 3,
+        "name": "IME7-3"
+    },
+    {
+        "id": 1780274000341,
+        "careerCode": "IME",
+        "plan": "plan-normal",
+        "cuatrimestre": 7,
+        "groupNumber": 2,
+        "name": "IME7-2"
+    },
+    {
+        "id": 1780274000340,
+        "careerCode": "IME",
+        "plan": "plan-normal",
+        "cuatrimestre": 7,
+        "groupNumber": 1,
+        "name": "IME7-1"
+    },
+    {
+        "id": 1780274000339,
+        "careerCode": "IEDS",
+        "plan": "nuevo-modelo",
+        "cuatrimestre": 7,
+        "groupNumber": 3,
+        "name": "IEDS7-3"
+    },
+    {
+        "id": 1780274000338,
+        "careerCode": "IEDS",
+        "plan": "nuevo-modelo",
+        "cuatrimestre": 7,
+        "groupNumber": 2,
+        "name": "IEDS7-2"
+    },
+    {
+        "id": 1780274000337,
+        "careerCode": "IEDS",
+        "plan": "nuevo-modelo",
+        "cuatrimestre": 7,
+        "groupNumber": 1,
+        "name": "IEDS7-1"
+    },
+    {
+        "id": 1780274000336,
+        "careerCode": "ILI",
+        "plan": "nuevo-modelo",
+        "cuatrimestre": 7,
+        "groupNumber": 3,
+        "name": "ILI7-3"
+    },
+    {
+        "id": 1780274000335,
+        "careerCode": "ILI",
+        "plan": "nuevo-modelo",
+        "cuatrimestre": 7,
+        "groupNumber": 2,
+        "name": "ILI7-2"
+    },
+    {
+        "id": 1780274000334,
+        "careerCode": "ILI",
+        "plan": "nuevo-modelo",
+        "cuatrimestre": 7,
+        "groupNumber": 1,
+        "name": "ILI7-1"
+    },
+    {
+        "id": 1780274000333,
+        "careerCode": "LNM",
+        "plan": "nuevo-modelo",
+        "cuatrimestre": 7,
+        "groupNumber": 3,
+        "name": "LNM7-3"
+    },
+    {
+        "id": 1780274000332,
+        "careerCode": "LNM",
+        "plan": "nuevo-modelo",
+        "cuatrimestre": 7,
+        "groupNumber": 2,
+        "name": "LNM7-2"
+    },
+    {
+        "id": 1780274000331,
+        "careerCode": "LNM",
+        "plan": "nuevo-modelo",
+        "cuatrimestre": 7,
+        "groupNumber": 1,
+        "name": "LNM7-1"
+    },
+    {
+        "id": 1780274000330,
+        "careerCode": "ITIID",
+        "plan": "nuevo-modelo",
+        "cuatrimestre": 7,
+        "groupNumber": 3,
+        "name": "ITIID7-3"
+    },
+    {
+        "id": 1780274000328,
+        "careerCode": "ITIID",
+        "plan": "nuevo-modelo",
+        "cuatrimestre": 7,
+        "groupNumber": 2,
+        "name": "ITIID7-2"
+    },
+    {
+        "id": 1780274000326,
+        "careerCode": "ITIID",
+        "plan": "nuevo-modelo",
+        "cuatrimestre": 7,
+        "groupNumber": 1,
+        "name": "ITIID7-1"
+    },
+    {
+        "id": 1780274000325,
+        "careerCode": "IMI",
+        "plan": "nuevo-modelo",
+        "cuatrimestre": 7,
+        "groupNumber": 3,
+        "name": "IMI7-3"
+    },
+    {
+        "id": 1780274000324,
+        "careerCode": "IMI",
+        "plan": "nuevo-modelo",
+        "cuatrimestre": 7,
+        "groupNumber": 2,
+        "name": "IMI7-2"
+    },
+    {
+        "id": 1780274000323,
+        "careerCode": "IMI",
+        "plan": "nuevo-modelo",
+        "cuatrimestre": 7,
+        "groupNumber": 1,
+        "name": "IMI7-1"
+    },
+    {
+        "id": 1780274000322,
+        "careerCode": "IM",
+        "plan": "nuevo-modelo",
+        "cuatrimestre": 7,
+        "groupNumber": 3,
+        "name": "IM7-3"
+    },
+    {
+        "id": 1780274000321,
+        "careerCode": "IM",
+        "plan": "nuevo-modelo",
+        "cuatrimestre": 7,
+        "groupNumber": 2,
+        "name": "IM7-2"
+    },
+    {
+        "id": 1780274000320,
+        "careerCode": "IM",
+        "plan": "nuevo-modelo",
+        "cuatrimestre": 7,
+        "groupNumber": 1,
+        "name": "IM7-1"
+    },
+    {
+        "id": 1780274000319,
+        "careerCode": "IA",
+        "plan": "nuevo-modelo",
+        "cuatrimestre": 7,
+        "groupNumber": 3,
+        "name": "IA7-3"
+    },
+    {
+        "id": 1780274000318,
+        "careerCode": "IA",
+        "plan": "nuevo-modelo",
+        "cuatrimestre": 7,
+        "groupNumber": 2,
+        "name": "IA7-2"
+    },
+    {
+        "id": 1780274000317,
+        "careerCode": "IA",
+        "plan": "nuevo-modelo",
+        "cuatrimestre": 7,
+        "groupNumber": 1,
+        "name": "IA7-1"
+    },
+    {
+        "id": 1780274000316,
+        "careerCode": "ES",
+        "plan": "nuevo-modelo",
+        "cuatrimestre": 0,
+        "groupNumber": 3,
+        "name": "ES0-3"
+    },
+    {
+        "id": 1780274000315,
+        "careerCode": "ES",
+        "plan": "nuevo-modelo",
+        "cuatrimestre": 0,
+        "groupNumber": 1,
+        "name": "ES0-1"
+    },
+    {
+        "id": 1780274000314,
+        "careerCode": "ES",
+        "plan": "nuevo-modelo",
+        "cuatrimestre": 0,
+        "groupNumber": 1,
+        "name": "ES0-1"
+    },
+    {
+        "id": 1780274000313,
+        "careerCode": "OLCE",
+        "plan": "nuevo-modelo",
+        "cuatrimestre": 0,
+        "groupNumber": 3,
+        "name": "OLCE0-3"
+    },
+    {
+        "id": 1780274000312,
+        "careerCode": "OLCE",
+        "plan": "nuevo-modelo",
+        "cuatrimestre": 0,
+        "groupNumber": 2,
+        "name": "OLCE0-2"
+    },
+    {
+        "id": 1780274000311,
+        "careerCode": "MCD",
+        "plan": "nuevo-modelo",
+        "cuatrimestre": 0,
+        "groupNumber": 3,
+        "name": "MCD0-3"
+    },
+    {
+        "id": 1780274000310,
+        "careerCode": "MCD",
+        "plan": "nuevo-modelo",
+        "cuatrimestre": 0,
+        "groupNumber": 2,
+        "name": "MCD0-2"
+    },
+    {
+        "id": 1780274000309,
+        "careerCode": "MCD",
+        "plan": "nuevo-modelo",
+        "cuatrimestre": 0,
+        "groupNumber": 1,
+        "name": "MCD0-1"
+    },
+    {
+        "id": 1780274000308,
+        "careerCode": "DSM",
+        "plan": "nuevo-modelo",
+        "cuatrimestre": 0,
+        "groupNumber": 3,
+        "name": "DSM0-3"
+    },
+    {
+        "id": 1780274000307,
+        "careerCode": "DSM",
+        "plan": "nuevo-modelo",
+        "cuatrimestre": 0,
+        "groupNumber": 2,
+        "name": "DSM0-2"
+    },
+    {
+        "id": 1780274000306,
+        "careerCode": "DSM",
+        "plan": "nuevo-modelo",
+        "cuatrimestre": 0,
+        "groupNumber": 1,
+        "name": "DSM0-1"
+    },
+    {
+        "id": 1780274000305,
+        "careerCode": "MI",
+        "plan": "nuevo-modelo",
+        "cuatrimestre": 0,
+        "groupNumber": 3,
+        "name": "MI0-3"
+    },
+    {
+        "id": 1780274000304,
+        "careerCode": "MI",
+        "plan": "nuevo-modelo",
+        "cuatrimestre": 0,
+        "groupNumber": 2,
+        "name": "MI0-2"
+    },
+    {
+        "id": 1780274000303,
+        "careerCode": "MI",
+        "plan": "nuevo-modelo",
+        "cuatrimestre": 0,
+        "groupNumber": 1,
+        "name": "MI0-1"
+    },
+    {
+        "id": 1780274000302,
+        "careerCode": "AUT",
+        "plan": "nuevo-modelo",
+        "cuatrimestre": 0,
+        "groupNumber": 3,
+        "name": "AUT0-3"
+    },
+    {
+        "id": 1780274000301,
+        "careerCode": "AUT",
+        "plan": "nuevo-modelo",
+        "cuatrimestre": 0,
+        "groupNumber": 2,
+        "name": "AUT0-2"
+    },
+    {
+        "id": 1780274000300,
+        "careerCode": "AUT",
+        "plan": "nuevo-modelo",
+        "cuatrimestre": 0,
+        "groupNumber": 1,
+        "name": "AUT0-1"
+    },
+    {
+        "id": 1780274000299,
+        "careerCode": "TA",
+        "plan": "nuevo-modelo",
+        "cuatrimestre": 0,
+        "groupNumber": 3,
+        "name": "TA0-3"
+    },
+    {
+        "id": 1780274000298,
+        "careerCode": "TA",
+        "plan": "nuevo-modelo",
+        "cuatrimestre": 0,
+        "groupNumber": 2,
+        "name": "TA0-2"
+    },
+    {
+        "id": 1780274000297,
+        "careerCode": "TA",
+        "plan": "nuevo-modelo",
+        "cuatrimestre": 0,
+        "groupNumber": 1,
+        "name": "TA0-1"
+    },
+    {
         "id": 1780274000296,
         "careerCode": "IDGS",
         "plan": "plan-normal",
@@ -14,13 +478,5 @@
         "cuatrimestre": 5,
         "groupNumber": 1,
         "name": "OLCE5-1"
-    },
-    {
-        "id": 1780273936688,
-        "careerCode": "AUT",
-        "plan": "nuevo-modelo",
-        "cuatrimestre": 2,
-        "groupNumber": 1,
-        "name": "AUT2-1"
     }
 ]
