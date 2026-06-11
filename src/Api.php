@@ -73,6 +73,11 @@ final class Api
             return;
         }
 
+        if ($first === 'default-avatar' && $method === 'GET') {
+            $this->streamDefaultAvatar();
+            return;
+        }
+
         if ($first === 'groups') {
             // public listing: if query contains career_code/cuatrimestre/cycle_id, read from DB
             if ($method === 'GET' && count($segments) === 1) {
@@ -1713,15 +1718,21 @@ if (($method === 'POST' || $method === 'PATCH' || $method === 'PUT') && $action 
         'lastMessage' => (string) ($latestMessage['body'] ?? 'Nuevo chat'),
         'timestamp' => (string) ($latestMessage['created_at'] ?? $conversation['updated_at'] ?? ''),
         'unread' => (int) ($currentParticipant['unread_count'] ?? 0),
-        'avatar_url' => $otherParticipant['avatar_url'] ?? null,
-        'avatar' => $otherParticipant['avatar_url'] ?? $this->buildAvatar((string) $otherParticipant['full_name']),
+        'avatar_url' => $otherParticipant['avatar_url'] ?? $this->defaultAvatarUrl(),
+        'avatar_fallback' => $this->buildAvatar((string) $otherParticipant['full_name']),
+        'avatar' => $otherParticipant['avatar_url'] ?? $this->defaultAvatarUrl(),
         'status' => 'offline',
-        'participants' => array_map(static function (array $participant): array {
+        'participants' => array_map(function (array $participant): array {
+            $participantFallback = $this->buildAvatar((string) $participant['full_name']);
+            $participantAvatar = $participant['avatar_url'] ?? $this->defaultAvatarUrl();
+
             return [
                 'id' => (int) $participant['id'],
                 'name' => (string) $participant['full_name'],
                 'role' => (string) ($participant['role_code'] ?? 'docente'),
-                'avatar_url' => $participant['avatar_url'] ?? null,
+                'avatar_url' => $participant['avatar_url'] ?? $this->defaultAvatarUrl(),
+                'avatar_fallback' => $participantFallback,
+                'avatar' => $participantAvatar,
             ];
         }, $participants),
         'lastMessageAt' => (string) ($latestMessage['created_at'] ?? $conversation['updated_at'] ?? ''),
@@ -1743,15 +1754,19 @@ if (($method === 'POST' || $method === 'PATCH' || $method === 'PUT') && $action 
         [$conversationId]
     );
 
-    return array_map(static function (array $message) use ($currentUserId): array {
+    return array_map(function (array $message) use ($currentUserId): array {
+        $senderFallback = $this->buildAvatar((string) ($message['sender_name'] ?? 'Usuario'));
+        $senderAvatar = $message['sender_avatar'] ?? $this->defaultAvatarUrl();
+
         return [
             'id' => (int) $message['id'],
             'sender' => (string) ($message['sender_name'] ?? 'Usuario'),
             'content' => (string) ($message['body'] ?? ''),
             'timestamp' => (string) ($message['created_at'] ?? ''),
             'isOwn' => (int) ($message['sender_user_id'] ?? 0) === $currentUserId,
-            'avatar_url' => $message['sender_avatar'] ?? null,
-            'avatar' => $message['sender_avatar'] ?? null,
+            'avatar_url' => $message['sender_avatar'] ?? $this->defaultAvatarUrl(),
+            'avatar_fallback' => $senderFallback,
+            'avatar' => $senderAvatar,
             'attachments' => [],
             'replyTo' => !empty($message['reply_to_message_id']) ? [
                 'id' => (int) $message['reply_to_message_id'],
@@ -1786,7 +1801,9 @@ private function fetchConversationMessageById(int $messageId, int $currentUserId
         'content' => (string) ($message['body'] ?? ''),
         'timestamp' => (string) ($message['created_at'] ?? ''),
         'isOwn' => (int) ($message['sender_user_id'] ?? 0) === $currentUserId,
-        'avatar_url' => $message['sender_avatar'] ?? null,
+        'avatar_url' => $message['sender_avatar'] ?? $this->defaultAvatarUrl(),
+        'avatar_fallback' => $this->buildAvatar((string) ($message['sender_name'] ?? 'Usuario')),
+        'avatar' => $message['sender_avatar'] ?? $this->defaultAvatarUrl(),
         'attachments' => [],
         'replyTo' => !empty($message['reply_to_message_id']) ? [
             'id' => (int) $message['reply_to_message_id'],
@@ -1836,13 +1853,72 @@ private function fetchConversationMessageById(int $messageId, int $currentUserId
         return $initials !== '' ? $initials : 'CH';
     }
 
+    private function defaultAvatarUrl(): string
+    {
+        return '/api/default-avatar';
+    }
+
     private function publicAvatarUrl(array $user): ?string
     {
         if (!isset($user['id'])) {
-            return $user['avatar_url'] ?? null;
+            return $user['avatar_url'] ?? $this->defaultAvatarUrl();
         }
 
-        return !empty($user['avatar_url']) ? '/api/users/' . (int) $user['id'] . '/avatar' : null;
+        $avatarFile = $this->resolveStoredAvatarFile((int) $user['id'], $user['avatar_url'] ?? null);
+        if ($avatarFile === null) {
+            return !empty($user['avatar_url']) ? '/api/users/' . (int) $user['id'] . '/avatar' : $this->defaultAvatarUrl();
+        }
+
+        $mimeType = $this->detectAvatarMimeType($avatarFile);
+
+        return 'data:' . $mimeType . ';base64,' . base64_encode((string) file_get_contents($avatarFile));
+    }
+
+    private function resolveStoredAvatarFile(int $userId, ?string $avatarUrl): ?string
+    {
+        $avatarDir = __DIR__ . '/../public/uploads/avatars';
+
+        if (!empty($avatarUrl) && str_starts_with($avatarUrl, '/uploads/avatars/')) {
+            $avatarPath = __DIR__ . '/../public' . $avatarUrl;
+            if (is_file($avatarPath)) {
+                return $avatarPath;
+            }
+        }
+
+        if (!empty($avatarUrl) && str_starts_with($avatarUrl, '/api/users/' . $userId . '/avatar')) {
+            $matches = glob($avatarDir . '/avatar_' . $userId . '_*');
+            if (is_array($matches) && $matches !== []) {
+                usort($matches, static function (string $left, string $right): int {
+                    return filemtime($right) <=> filemtime($left);
+                });
+
+                return $matches[0];
+            }
+        }
+
+        $matches = glob($avatarDir . '/avatar_' . $userId . '_*');
+        if (is_array($matches) && $matches !== []) {
+            usort($matches, static function (string $left, string $right): int {
+                return filemtime($right) <=> filemtime($left);
+            });
+
+            return $matches[0];
+        }
+
+        return null;
+    }
+
+    private function detectAvatarMimeType(string $avatarFile): string
+    {
+        $extension = strtolower(pathinfo($avatarFile, PATHINFO_EXTENSION));
+
+        return match ($extension) {
+            'jpg', 'jpeg' => 'image/jpeg',
+            'png' => 'image/png',
+            'gif' => 'image/gif',
+            'webp' => 'image/webp',
+            default => (function_exists('mime_content_type') ? mime_content_type($avatarFile) : 'application/octet-stream'),
+        };
     }
 
   private function streamUserAvatar(int $userId): void
@@ -1896,6 +1972,37 @@ private function fetchConversationMessageById(int $messageId, int $currentUserId
     readfile($avatarFile);
     exit;
 }
+
+    private function streamDefaultAvatar(): void
+    {
+        $avatarFile = __DIR__ . '/../public/uploads/avatars/profile.webp';
+
+        if (!is_file($avatarFile)) {
+            Response::error('Avatar not found', 404);
+        }
+
+        $extension = strtolower(pathinfo($avatarFile, PATHINFO_EXTENSION));
+        $mimeType = match ($extension) {
+            'jpg', 'jpeg' => 'image/jpeg',
+            'png' => 'image/png',
+            'gif' => 'image/gif',
+            'webp' => 'image/webp',
+            default => (function_exists('mime_content_type') ? mime_content_type($avatarFile) : 'application/octet-stream'),
+        };
+
+        $filemtime = filemtime($avatarFile);
+
+        header('Content-Type: ' . $mimeType);
+        header('Content-Length: ' . filesize($avatarFile));
+        header('Cache-Control: no-cache, must-revalidate');
+        header('Pragma: no-cache');
+        header('Expires: 0');
+        header('Last-Modified: ' . gmdate('D, d M Y H:i:s', $filemtime) . ' GMT');
+        header('Access-Control-Allow-Origin: ' . Config::allowedFrontendOrigin());
+        header('Access-Control-Allow-Credentials: true');
+        readfile($avatarFile);
+        exit;
+    }
     private function getUsersWithRoles(): array
     {
         $users = $this->fetchAll(
@@ -2292,10 +2399,11 @@ private function fetchConversationMessageById(int $messageId, int $currentUserId
     // Obtener el usuario actualizado
     $updatedUser = $this->getUserById((int) $user['id']);
     
-    // Forzar refresco del avatar añadiendo timestamp
-    if ($updatedUser && $updatedUser['avatar_url']) {
+    // No alterar data URLs; llegan ya listas para renderizar en el frontend.
+    if ($updatedUser && !empty($updatedUser['avatar_url']) && !str_starts_with((string) $updatedUser['avatar_url'], 'data:')) {
         $timestamp = time();
-        $updatedUser['avatar_url'] = $updatedUser['avatar_url'] . '?t=' . $timestamp;
+        $separator = str_contains((string) $updatedUser['avatar_url'], '?') ? '&' : '?';
+        $updatedUser['avatar_url'] = $updatedUser['avatar_url'] . $separator . 't=' . $timestamp;
     }
     
     Response::json(['user' => $updatedUser]);
