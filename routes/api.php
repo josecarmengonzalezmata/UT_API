@@ -49,4 +49,10 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/conversations/{conversation}/messages', [MessageController::class, 'storeMessage']);
     Route::delete('/conversations/{conversation}/messages/{message}', [MessageController::class, 'destroy']);
     Route::patch('/conversations/{conversation}/read', [MessageController::class, 'markAsRead']);
+    
+        // Document distribution and filtering endpoints
+        Route::get('/documents-active-cycle', [DocumentController::class, 'byCycleActive']);
+        Route::get('/documents-by-docente', [DocumentController::class, 'byDocente']);
+        Route::get('/documents-pending-review', [DocumentController::class, 'pendingForReview']);
+        Route::get('/documents-status-count', [DocumentController::class, 'countByStatus']);
 });

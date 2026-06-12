@@ -177,3 +177,43 @@ Array
     [REQUEST_CONTENT_TYPE] => application/json
 )
 
+[2026-06-12T02:51:53+02:00] POST /documents body keys: Array
+(
+    [0] => name
+    [1] => year
+    [2] => period_name
+    [3] => start_date
+    [4] => end_date
+    [5] => status
+)
+
+[2026-06-12T02:51:53+02:00] POST /documents body keys: Array
+(
+    [0] => name
+    [1] => year
+    [2] => period_name
+    [3] => start_date
+    [4] => end_date
+    [5] => status
+)
+
+[2026-06-12T10:17:51+02:00] POST /documents body keys: Array
+(
+    [0] => name
+    [1] => year
+    [2] => period_name
+    [3] => start_date
+    [4] => end_date
+    [5] => status
+)
+
+[2026-06-12T10:17:51+02:00] POST /documents body keys: Array
+(
+    [0] => name
+    [1] => year
+    [2] => period_name
+    [3] => start_date
+    [4] => end_date
+    [5] => status
+)
+

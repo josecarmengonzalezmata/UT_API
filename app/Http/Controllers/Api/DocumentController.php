@@ -25,15 +25,24 @@ class DocumentController extends Controller
     {
         $submittedAt = $document->submitted_at ?? $document->created_at;
         $groupCode = $document->group?->group_code ?? ($document->group_id ? (string) $document->group_id : null);
+        $tipo = $document->apartado_label
+            ? strtolower(str_replace(' ', '-', $document->apartado_label))
+            : ($document->form?->form_code ?? 'documento');
 
         return [
             'id' => $document->id,
             'nombre' => $document->title,
-            'tipo' => $document->form?->form_code ?? ($document->apartado_label ? strtolower(str_replace(' ', '-', $document->apartado_label)) : 'documento'),
+            'tipo' => $tipo,
             'tipoLabel' => $document->form?->title ?? $document->apartado_label ?? 'Documento',
             'materia' => $document->materia ?? 'Sin materia',
             'parcial' => $document->parcial ?? '-',
             'grupo' => $groupCode ?? '-',
+            'plan' => $document->plan,
+            'carrera' => $document->carrera_label,
+            'docente' => $document->uploader?->full_name ?? $document->uploader?->name ?? 'Sin docente',
+            'cycle_id' => $document->cycle_id,
+            'uploaded_by' => $document->uploaded_by,
+            'apartado_label' => $document->apartado_label,
             'fecha' => $submittedAt?->toDateString(),
             'hora' => $submittedAt?->format('H:i'),
             'status' => $document->status,
@@ -45,7 +54,7 @@ class DocumentController extends Controller
 
     public function index(Request $request): JsonResponse
     {
-        $query = Document::query()->with(['form', 'group']);
+        $query = Document::query()->with(['form', 'group', 'uploader']);
 
         if (!$this->isAdmin($request)) {
             $query->where('uploaded_by', $request->user()->id);
@@ -90,7 +99,7 @@ class DocumentController extends Controller
 
         $document = Document::query()->create([
             'form_id' => $data['form_id'],
-            'cycle_id' => $data['cycle_id'] ?? null,
+                'cycle_id' => $data['cycle_id'] ?? $this->getActiveCycleId(),
             'uploaded_by' => $request->user()->id,
             'title' => $data['title'],
             'apartado_label' => $data['apartado_label'] ?? null,
@@ -186,4 +195,107 @@ class DocumentController extends Controller
 
         return response()->json(['data' => $document->fresh()]);
     }
+
+        private function getActiveCycleId(): ?int
+        {
+            $activeCycle = \App\Models\AcademicCycle::where('status', 'activo')->first();
+            return $activeCycle?->id;
+        }
+
+        public function byCycleActive(Request $request): JsonResponse
+        {
+            $activeCycle = \App\Models\AcademicCycle::where('status', 'activo')->first();
+
+            if (!$activeCycle) {
+                return response()->json(['data' => [], 'message' => 'No active cycle'], 200);
+            }
+
+            $query = Document::where('cycle_id', $activeCycle->id)
+                ->with(['form', 'group', 'uploader']);
+
+            if (!$this->isAdmin($request)) {
+                $query->where('uploaded_by', $request->user()->id);
+            }
+
+            if ($request->filled('status')) {
+                $query->where('status', $request->string('status'));
+            }
+
+            $documents = $query->orderByDesc('submitted_at')
+                ->paginate($request->integer('per_page', 20));
+            $documents->setCollection($documents->getCollection()->map(fn (Document $document) => $this->formatDocument($document)));
+
+            return response()->json([
+                'data' => $documents,
+                'cycle' => $activeCycle,
+            ]);
+        }
+
+        public function byDocente(Request $request): JsonResponse
+        {
+            $docenteId = $request->integer('docente_id');
+            $cycleId = $request->integer('cycle_id', $this->getActiveCycleId());
+
+            $query = Document::where('uploaded_by', $docenteId)
+                ->with(['form', 'group', 'uploader']);
+
+            if ($cycleId) {
+                $query->where('cycle_id', $cycleId);
+            }
+
+            if ($request->filled('status')) {
+                $query->where('status', $request->string('status'));
+            }
+
+            if ($request->filled('type')) {
+                $type = $request->string('type');
+                if ($type === 'docentes') {
+                    // Documents of type planeacion, instrumento-*, etc
+                    $query->whereIn('apartado_label', ['planeacion', 'instrumento-30', 'instrumento-40', 'instrumento-60', 'instrumento-70', 'instrumento-30-40', 'instrumento-60-70', 'lista-concentrada', 'asesoria', 'portafolio', 'acta-final']);
+                } elseif ($type === 'tutores') {
+                    // Tutor-specific document types
+                    $query->whereIn('apartado_label', ['carga-academica', 'reporte-bajas', 'concentrado-asesorias', 'acta-asistencia', 'ficha-tecnica']);
+                }
+            }
+
+            $documents = $query->orderByDesc('submitted_at')
+                ->paginate($request->integer('per_page', 20));
+            $documents->setCollection($documents->getCollection()->map(fn (Document $document) => $this->formatDocument($document)));
+
+            return response()->json(['data' => $documents]);
+        }
+
+        public function pendingForReview(Request $request): JsonResponse
+        {
+            $cycleId = $request->integer('cycle_id', $this->getActiveCycleId());
+
+            $query = Document::where('status', 'pendiente')
+                ->with(['form', 'group', 'uploader']);
+
+            if ($cycleId) {
+                $query->where('cycle_id', $cycleId);
+            }
+
+            $documents = $query->orderBy('submitted_at')
+                ->paginate($request->integer('per_page', 50));
+            $documents->setCollection($documents->getCollection()->map(fn (Document $document) => $this->formatDocument($document)));
+
+            return response()->json(['data' => $documents]);
+        }
+
+        public function countByStatus(Request $request): JsonResponse
+        {
+            $cycleId = $request->integer('cycle_id', $this->getActiveCycleId());
+
+            $counts = [];
+            foreach (['pendiente', 'revisado', 'devuelto', 'reenviado'] as $status) {
+                $query = Document::where('status', $status);
+                if ($cycleId) {
+                    $query->where('cycle_id', $cycleId);
+                }
+                $counts[$status] = $query->count();
+            }
+
+            return response()->json(['data' => $counts, 'cycle_id' => $cycleId]);
+        }
 }
