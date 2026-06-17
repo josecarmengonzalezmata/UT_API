@@ -23,6 +23,9 @@ class MessageController extends Controller
             })
             ->orderByDesc('updated_at')
             ->get()
+            ->filter(function (Conversation $conversation) use ($currentUser) {
+                return $this->isConversationAllowed($conversation, $currentUser);
+            })
             ->map(function (Conversation $conversation) use ($currentUser) {
                 return $this->formatConversation($conversation, (int) $currentUser->id);
             })
@@ -91,26 +94,19 @@ class MessageController extends Controller
         // If a recipient was provided, validate role pairing
         if (isset($data['recipient_user_id'])) {
             $recipient = User::query()->with('roles')->find((int) $data['recipient_user_id']);
-            $currentRole = $request->user()->roles->first()?->code ?? 'docente';
-            $recipientRole = $recipient->roles->first()?->code ?? 'docente';
-            if ($currentRole === $recipientRole) {
-                return response()->json(['message' => 'Las conversaciones solo están permitidas entre Administrador y Docente'], 422);
+            $currentUser = $request->user();
+            $currentUser->loadMissing('roles');
+            if (! $recipient || ! $this->isAllowedConversationPair($currentUser, $recipient)) {
+                return response()->json(['message' => 'Las conversaciones solo están permitidas entre Administrador y Docente/Tutor'], 422);
             }
         }
 
-        // If two participant ids provided, validate their roles are opposite
+        // If two participant ids provided, validate role pairing
         if ($participantIds->count() === 2) {
             $users = User::query()->with('roles')->whereIn('id', $participantIds->all())->get();
             if ($users->count() === 2) {
-                $roleA = $users[0]->roles->first()?->code ?? 'docente';
-                $roleB = $users[1]->roles->first()?->code ?? 'docente';
-                if ($roleA === $roleB) {
-                    return response()->json(['message' => 'Las conversaciones solo están permitidas entre Administrador y Docente'], 422);
-                }
-                $pair = [$roleA, $roleB];
-                sort($pair);
-                if ($pair !== ['administrador', 'docente']) {
-                    return response()->json(['message' => 'Pareja de roles no permitida para conversaciones'], 422);
+                if (! $this->isAllowedConversationPair($users[0], $users[1])) {
+                    return response()->json(['message' => 'Las conversaciones solo están permitidas entre Administrador y Docente/Tutor'], 422);
                 }
             }
         }
@@ -213,6 +209,10 @@ class MessageController extends Controller
 
     public function markAsRead(Request $request, Conversation $conversation): JsonResponse
     {
+        if (! $this->isConversationAllowed($conversation, $request->user())) {
+            return response()->json(['message' => 'Acceso denegado a esta conversación'], 403);
+        }
+
         DB::table('conversation_participants')
             ->where('conversation_id', $conversation->id)
             ->where('user_id', $request->user()->id)
@@ -334,9 +334,27 @@ class MessageController extends Controller
         ];
     }
 
-    private function getPrimaryRoleCode(User $user): string
+    private function userHasRole(User $user, string $roleCode): bool
     {
-        return $user->roles->first()?->code ?? 'docente';
+        $user->loadMissing('roles');
+        return $user->roles->contains(function ($role) use ($roleCode) {
+            return (string) $role->code === $roleCode;
+        });
+    }
+
+    private function isTeacherRole(User $user): bool
+    {
+        return $this->userHasRole($user, 'docente') || $this->userHasRole($user, 'tutor');
+    }
+
+    private function isAllowedConversationPair(User $userA, User $userB): bool
+    {
+        $userAIsAdmin = $this->userHasRole($userA, 'administrador');
+        $userBIsAdmin = $this->userHasRole($userB, 'administrador');
+        $userAIsTeacher = $this->isTeacherRole($userA);
+        $userBIsTeacher = $this->isTeacherRole($userB);
+
+        return ($userAIsAdmin && $userBIsTeacher) || ($userBIsAdmin && $userAIsTeacher);
     }
 
     private function isConversationAllowed(Conversation $conversation, User $currentUser): bool
@@ -356,17 +374,6 @@ class MessageController extends Controller
         $other = $conversation->participants->firstWhere('id', '!=', $currentUser->id);
         if (! $other) return false;
 
-        $currentRole = $this->getPrimaryRoleCode($currentUser);
-        $otherRole = $other->roles->first()?->code ?? 'docente';
-
-        // enforce admin <-> docente pairing
-        if ($currentRole === $otherRole) {
-            return false;
-        }
-
-        // valid pairing if one is administrador and the other is docente
-        $pair = [$currentRole, $otherRole];
-        sort($pair);
-        return $pair === ['administrador', 'docente'];
+        return $this->isAllowedConversationPair($currentUser, $other);
     }
 }

@@ -811,6 +811,11 @@ final class Api
 
         if ($method === 'GET' && count($segments) === 1) {
                     $sql = 'SELECT d.*, f.form_code, f.title AS form_title, ac.name AS cycle_name, u.full_name AS uploaded_by_name,
+                        (SELECT dsh.notes
+                         FROM document_status_history dsh
+                         WHERE dsh.document_id = d.id AND dsh.action = "devuelto"
+                         ORDER BY dsh.created_at DESC, dsh.id DESC
+                         LIMIT 1) AS returned_comment,
                         g.group_code AS group_code, g.group_number AS group_number, g.cuatrimestre AS cuatrimestre, g.group_code AS group_name, ar.full_name AS assigned_reviewer_name
                     FROM documents d
                     JOIN forms f ON f.id = d.form_id
@@ -1151,24 +1156,34 @@ final class Api
             $this->requireAnyRole($user, ['administrador']);
             $data = $this->body();
             $status = $data['status'] ?? 'revisado';
+            $notes = isset($data['notes']) ? trim((string) $data['notes']) : null;
             if (!in_array($status, ['revisado', 'devuelto'], true)) {
                 Response::error('Invalid review status', 422);
+            }
+
+            if ($status === 'devuelto' && $notes === '') {
+                Response::error('El comentario de devolución es obligatorio', 422);
             }
 
             $pdo->prepare('UPDATE documents SET status = ?, reviewed_at = NOW(), returned_at = CASE WHEN ? = "devuelto" THEN NOW() ELSE returned_at END WHERE id = ?')
                 ->execute([$status, $status, $id]);
 
             $pdo->prepare('INSERT INTO document_status_history (document_id, action, action_by, notes) VALUES (?, ?, ?, ?)')
-                ->execute([$id, $status, $user['id'], $data['notes'] ?? null]);
+                ->execute([$id, $status, $user['id'], $notes !== '' ? $notes : null]);
 
             Response::json(['data' => $this->fetchOne('SELECT * FROM documents WHERE id = ?', [$id])]);
         }
 
         if (($segments[2] ?? '') === 'return' && ($method === 'PATCH' || $method === 'PUT')) {
             $this->requireAnyRole($user, ['administrador']);
+            $data = $this->body();
+            $notes = trim((string) ($data['notes'] ?? ''));
+            if ($notes === '') {
+                Response::error('El comentario de devolución es obligatorio', 422);
+            }
             $pdo->prepare('UPDATE documents SET status = "devuelto", returned_at = NOW() WHERE id = ?')->execute([$id]);
             $pdo->prepare('INSERT INTO document_status_history (document_id, action, action_by, notes) VALUES (?, ?, ?, ?)')
-                ->execute([$id, 'devuelto', $user['id'], 'Documento devuelto']);
+                ->execute([$id, 'devuelto', $user['id'], $notes]);
             Response::json(['data' => $this->fetchOne('SELECT * FROM documents WHERE id = ?', [$id])]);
         }
 
@@ -1273,7 +1288,7 @@ final class Api
                 static fn (array $role): string => (string) ($role['code'] ?? ''),
                 $this->getRolesByUserId($currentUserId)
             );
-            if (in_array('docente', $currentUserRoles, true)) {
+            if (in_array('docente', $currentUserRoles, true) || in_array('tutor', $currentUserRoles, true)) {
                 $adminId = (int) ($this->scalar(
                     "SELECT u.id
                      FROM users u
@@ -1295,29 +1310,16 @@ final class Api
             Response::error('Solo se permiten conversaciones entre dos participantes', 422);
         }
 
-        $users = $this->fetchAll(
-            'SELECT u.id, u.full_name, r.code AS role_code 
-             FROM users u 
-             LEFT JOIN user_roles ur ON ur.user_id = u.id 
-             LEFT JOIN roles r ON r.id = ur.role_id 
-             WHERE u.id IN (?, ?)',
-            [$participants[0], $participants[1]]
-        );
+        $users = $this->fetchAll('SELECT id FROM users WHERE id IN (?, ?)', [$participants[0], $participants[1]]);
 
         if (count($users) !== 2) {
             Response::error('Usuarios inválidos para la conversación', 422);
         }
 
-        $roleA = $users[0]['role_code'] ?? 'docente';
-        $roleB = $users[1]['role_code'] ?? 'docente';
-        if ($roleA === $roleB) {
-            Response::error('Las conversaciones solo están permitidas entre Administrador y Docente', 422);
-        }
-
-        $pair = [$roleA, $roleB];
-        sort($pair);
-        if ($pair !== ['administrador', 'docente']) {
-            Response::error('Pareja de roles no permitida para conversaciones', 422);
+        $rolesA = array_map(static fn (array $role): string => (string) ($role['code'] ?? ''), $this->getRolesByUserId($participants[0]));
+        $rolesB = array_map(static fn (array $role): string => (string) ($role['code'] ?? ''), $this->getRolesByUserId($participants[1]));
+        if (!$this->isAllowedConversationByRoleCodes($rolesA, $rolesB)) {
+            Response::error('Las conversaciones solo están permitidas entre Administrador y Docente/Tutor', 422);
         }
 
         // Si ya existe, devolver la existente (idempotente)
@@ -1482,7 +1484,7 @@ private function resolveConversationPeer(int $currentUserId): ?array
         $this->getRolesByUserId($currentUserId)
     );
 
-    if (in_array('docente', $currentRoles, true)) {
+    if (in_array('docente', $currentRoles, true) || in_array('tutor', $currentRoles, true)) {
         $admin = $this->fetchOne(
             "SELECT u.id, u.full_name, u.avatar_url
              FROM users u
@@ -1841,13 +1843,10 @@ private function loadUserConversations(int $userId): array
    private function requireConversationAccess(int $conversationId, int $currentUserId): void
 {
     $participants = $this->fetchAll(
-        'SELECT u.id, u.full_name, r.code AS role_code 
+        'SELECT DISTINCT u.id, u.full_name
          FROM conversation_participants cp 
          JOIN users u ON u.id = cp.user_id 
-         LEFT JOIN user_roles ur ON ur.user_id = u.id 
-         LEFT JOIN roles r ON r.id = ur.role_id 
          WHERE cp.conversation_id = ? 
-         GROUP BY u.id, u.full_name, r.code
          ORDER BY u.id ASC',
         [$conversationId]
     );
@@ -1861,22 +1860,32 @@ private function loadUserConversations(int $userId): array
         Response::error('Acceso denegado a esta conversación', 403);
     }
 
-    $roles = [];
-    foreach ($participants as $p) {
-        $userRoles = $this->getRolesByUserId((int) $p['id']);
-        $roleCodes = array_map(static fn (array $r): string => (string) $r['code'], $userRoles);
-        $roles[] = !empty($roleCodes) ? $roleCodes[0] : 'docente';
+    $firstRoles = array_map(static fn (array $r): string => (string) ($r['code'] ?? ''), $this->getRolesByUserId((int) $participants[0]['id']));
+    $secondRoles = array_map(static fn (array $r): string => (string) ($r['code'] ?? ''), $this->getRolesByUserId((int) $participants[1]['id']));
+
+    if (!$this->isAllowedConversationByRoleCodes($firstRoles, $secondRoles)) {
+        Response::error('Acceso denegado a esta conversación', 403);
     }
-    
-    sort($roles);
-    
-    if (count($roles) === 2) {
-        $hasAdmin = in_array('administrador', $roles, true);
-        $hasTeacher = in_array('docente', $roles, true) || in_array('tutor', $roles, true);
-        if (!$hasAdmin || !$hasTeacher) {
-            Response::error('Acceso denegado a esta conversación', 403);
-        }
-    }
+}
+
+private function userHasRoleCode(array $roleCodes, string $code): bool
+{
+    return in_array($code, $roleCodes, true);
+}
+
+private function isTeacherRoleCodes(array $roleCodes): bool
+{
+    return $this->userHasRoleCode($roleCodes, 'docente') || $this->userHasRoleCode($roleCodes, 'tutor');
+}
+
+private function isAllowedConversationByRoleCodes(array $firstRoleCodes, array $secondRoleCodes): bool
+{
+    $firstIsAdmin = $this->userHasRoleCode($firstRoleCodes, 'administrador');
+    $secondIsAdmin = $this->userHasRoleCode($secondRoleCodes, 'administrador');
+    $firstIsTeacher = $this->isTeacherRoleCodes($firstRoleCodes);
+    $secondIsTeacher = $this->isTeacherRoleCodes($secondRoleCodes);
+
+    return ($firstIsAdmin && $secondIsTeacher) || ($secondIsAdmin && $firstIsTeacher);
 }
 
 private function formatConversation(int $conversationId, int $currentUserId): ?array
@@ -1910,6 +1919,12 @@ private function formatConversation(int $conversationId, int $currentUserId): ?a
     }
 
     if ($currentParticipant === null || $otherParticipant === null) {
+        return null;
+    }
+
+    $currentRoleCodes = array_map(static fn (array $role): string => (string) ($role['code'] ?? ''), $this->getRolesByUserId((int) $currentParticipant['id']));
+    $otherRoleCodes = array_map(static fn (array $role): string => (string) ($role['code'] ?? ''), $this->getRolesByUserId((int) $otherParticipant['id']));
+    if (!$this->isAllowedConversationByRoleCodes($currentRoleCodes, $otherRoleCodes)) {
         return null;
     }
 
