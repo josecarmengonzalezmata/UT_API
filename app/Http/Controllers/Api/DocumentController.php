@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\Document;
+use App\Models\Group;
 use Illuminate\Http\Response;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -11,9 +12,42 @@ use Illuminate\Support\Facades\Storage;
 
 class DocumentController extends Controller
 {
+    private function resolveCycleId(?int $requestedCycleId = null, ?int $groupId = null, ?int $currentCycleId = null): ?int
+    {
+        if ($requestedCycleId && $requestedCycleId > 0) {
+            return $requestedCycleId;
+        }
+
+        if ($groupId && $groupId > 0) {
+            $groupCycleId = Group::query()->whereKey($groupId)->value('cycle_id');
+            if ($groupCycleId) {
+                return (int) $groupCycleId;
+            }
+        }
+
+        if ($currentCycleId && $currentCycleId > 0) {
+            return $currentCycleId;
+        }
+
+        return $this->getActiveCycleId();
+    }
+
     private function isAdmin(Request $request): bool
     {
-        return $request->user()?->roles()->where('code', 'administrador')->exists() ?? false;
+        $user = $request->user();
+        if (!$user) {
+            return false;
+        }
+
+        // Be tolerant with role naming/casing drift introduced by data updates.
+        return $user->roles()
+            ->where(function ($query) {
+                $query
+                    ->whereIn('code', ['administrador', 'admin'])
+                    ->orWhereIn('name', ['Administrador', 'Admin'])
+                    ->orWhere('roles.id', 1);
+            })
+            ->exists();
     }
 
     private function canAccessDocument(Request $request, Document $document): bool
@@ -54,9 +88,17 @@ class DocumentController extends Controller
 
     public function index(Request $request): JsonResponse
     {
+        $isAdmin = $this->isAdmin($request);
         $query = Document::query()->with(['form', 'group', 'uploader']);
 
-        if (!$this->isAdmin($request)) {
+        if ($request->filled('uploaded_by')) {
+            $requestedUploaderId = $request->integer('uploaded_by');
+            if ($isAdmin) {
+                $query->where('uploaded_by', $requestedUploaderId);
+            } else {
+                $query->where('uploaded_by', $request->user()->id);
+            }
+        } elseif (!$isAdmin) {
             $query->where('uploaded_by', $request->user()->id);
         }
 
@@ -65,7 +107,19 @@ class DocumentController extends Controller
         }
 
         if ($request->filled('cycle_id')) {
-            $query->where('cycle_id', $request->integer('cycle_id'));
+            $cycleId = $request->integer('cycle_id');
+            $query->where(function ($cycleQuery) use ($cycleId) {
+                $cycleQuery
+                    ->where('cycle_id', $cycleId)
+                    ->orWhere(function ($legacyQuery) use ($cycleId) {
+                        // Backward compatibility for historical rows imported with NULL cycle_id.
+                        $legacyQuery
+                            ->whereNull('cycle_id')
+                            ->whereHas('group', function ($groupQuery) use ($cycleId) {
+                                $groupQuery->where('cycle_id', $cycleId);
+                            });
+                    });
+            });
         }
 
         if ($request->filled('form_id')) {
@@ -95,11 +149,22 @@ class DocumentController extends Controller
             'file' => ['required', 'file', 'mimes:pdf', 'max:10240'],
         ]);
 
+        $resolvedCycleId = $this->resolveCycleId(
+            isset($data['cycle_id']) ? (int) $data['cycle_id'] : null,
+            isset($data['group_id']) ? (int) $data['group_id'] : null,
+        );
+
+        if (!$resolvedCycleId) {
+            return response()->json([
+                'message' => 'No hay ciclo disponible para registrar el documento. Define un ciclo activo o selecciona un grupo con ciclo.',
+            ], 422);
+        }
+
         $path = $request->file('file')->store('documents', 'public');
 
         $document = Document::query()->create([
             'form_id' => $data['form_id'],
-                'cycle_id' => $data['cycle_id'] ?? $this->getActiveCycleId(),
+            'cycle_id' => $resolvedCycleId,
             'uploaded_by' => $request->user()->id,
             'title' => $data['title'],
             'apartado_label' => $data['apartado_label'] ?? null,
@@ -131,9 +196,29 @@ class DocumentController extends Controller
 
     public function update(Request $request, Document $document): JsonResponse
     {
-        $document->fill($request->only([
+        $payload = $request->only([
             'title', 'apartado_label', 'plan', 'carrera_label', 'materia', 'parcial', 'group_id', 'cycle_id'
-        ]))->save();
+        ]);
+
+        $resolvedGroupId = array_key_exists('group_id', $payload)
+            ? (int) $payload['group_id']
+            : (int) ($document->group_id ?? 0);
+
+        $resolvedCycleId = $this->resolveCycleId(
+            array_key_exists('cycle_id', $payload) ? (int) $payload['cycle_id'] : null,
+            $resolvedGroupId,
+            (int) ($document->cycle_id ?? 0),
+        );
+
+        if (!$resolvedCycleId) {
+            return response()->json([
+                'message' => 'No hay ciclo disponible para actualizar el documento. Define un ciclo activo o selecciona un grupo con ciclo.',
+            ], 422);
+        }
+
+        $payload['cycle_id'] = $resolvedCycleId;
+
+        $document->fill($payload)->save();
 
         return response()->json(['data' => $document->fresh()]);
     }

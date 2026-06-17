@@ -981,7 +981,12 @@ final class Api
 
                 $tmpName = $_FILES['file']['tmp_name'] ?? '';
                 $originalName = basename((string) ($_FILES['file']['name'] ?? ($data['file_name'] ?? 'upload.pdf')));
-                $safeName = preg_replace('/[^A-Za-z0-9._-]/', '_', $originalName);
+                $safeName = str_replace(['/', '\\'], '_', $originalName);
+                $safeName = preg_replace('/[\x00-\x1F\x7F]/u', '', $safeName);
+                $safeName = trim($safeName);
+                if ($safeName === '') {
+                    $safeName = 'upload.pdf';
+                }
                 $storedName = uniqid('doc_', true) . '_' . $safeName;
                 $storedPath = $uploadDir . '/' . $storedName;
 
@@ -1048,7 +1053,15 @@ final class Api
                 }
             }
 
-            $resolvedCycleId = $this->resolveCycleIdForDocument($data['cycle_id'] ?? null, $existingDocument['cycle_id'] ?? null);
+            $resolvedCycleId = $this->resolveCycleIdForDocument(
+                $data['cycle_id'] ?? null,
+                $existingDocument['cycle_id'] ?? null,
+                $resolvedGroupId ?? ($existingDocument['group_id'] ?? null)
+            );
+
+            if ($resolvedCycleId === null) {
+                Response::error('No hay ciclo disponible para registrar el documento. Define un ciclo activo o selecciona un grupo con ciclo.', 422);
+            }
 
             if ($existingDocument) {
                 $statement = $pdo->prepare('UPDATE documents SET form_id = ?, cycle_id = ?, title = ?, apartado_label = ?, plan = ?, carrera_label = ?, materia = ?, parcial = ?, group_id = ?, file_path = ?, mime_type = ?, file_size_bytes = ?, status = ?, submitted_at = NOW() WHERE id = ?');
@@ -1198,10 +1211,17 @@ final class Api
         Response::error('Method not allowed', 405);
     }
 
-    private function resolveCycleIdForDocument(mixed $requestedCycleId, mixed $currentCycleId = null): ?int
+    private function resolveCycleIdForDocument(mixed $requestedCycleId, mixed $currentCycleId = null, mixed $groupId = null): ?int
     {
         if ($requestedCycleId !== null && (int) $requestedCycleId > 0) {
             return (int) $requestedCycleId;
+        }
+
+        if ($groupId !== null && (int) $groupId > 0) {
+            $groupCycleId = $this->scalar('SELECT cycle_id FROM `groups` WHERE id = ? LIMIT 1', [(int) $groupId]);
+            if ($groupCycleId !== null && (int) $groupCycleId > 0) {
+                return (int) $groupCycleId;
+            }
         }
 
         if ($currentCycleId !== null && (int) $currentCycleId > 0) {
