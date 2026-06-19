@@ -5,10 +5,13 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\Conversation;
 use App\Models\Message;
+use App\Models\MessageAttachment;
 use App\Models\User;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 
 class MessageController extends Controller
 {
@@ -142,7 +145,7 @@ class MessageController extends Controller
 
         return response()->json([
             'data' => Message::query()
-                ->with(['sender', 'replyTo.sender'])
+                ->with(['sender', 'replyTo.sender', 'attachments'])
                 ->where('conversation_id', $conversation->id)
                 ->orderBy('created_at')
                 ->get()
@@ -155,7 +158,13 @@ class MessageController extends Controller
                         'isOwn' => (int) $message->sender_user_id === $currentUserId,
                         'avatar_url' => $this->getUserAvatar($message->sender),
                         'avatar' => $this->getUserAvatar($message->sender),
-                        'attachments' => [],
+                        'attachments' => $message->attachments->map(function (MessageAttachment $attachment) {
+                            return [
+                                'name' => $attachment->file_name,
+                                'typeLabel' => $attachment->file_type_label ?? 'Archivo',
+                                'sizeLabel' => $this->formatFileSize($attachment->file_size_bytes),
+                            ];
+                        })->toArray(),
                         'replyTo' => $message->replyTo ? [
                             'id' => $message->replyTo->id,
                             'sender' => $message->replyTo->sender?->full_name ?? 'Usuario',
@@ -172,6 +181,8 @@ class MessageController extends Controller
         $data = $request->validate([
             'body' => ['required', 'string'],
             'reply_to_message_id' => ['nullable', 'integer', 'exists:messages,id'],
+            'attachments' => ['sometimes', 'array'],
+            'attachments.*' => ['file'],
         ]);
 
         // Ensure conversation is allowed and the user is participant
@@ -185,6 +196,24 @@ class MessageController extends Controller
             'body' => $data['body'],
             'reply_to_message_id' => $data['reply_to_message_id'] ?? null,
         ]);
+
+        $attachments = [];
+        foreach ($request->file('attachments', []) as $uploadedFile) {
+            if (! $uploadedFile || ! $uploadedFile->isValid()) {
+                continue;
+            }
+
+            $storedPath = $uploadedFile->store('message_attachments', 'public');
+            $attachment = MessageAttachment::query()->create([
+                'message_id' => $message->id,
+                'file_name' => $uploadedFile->getClientOriginalName(),
+                'file_path' => $storedPath,
+                'file_size_bytes' => $uploadedFile->getSize(),
+                'file_type_label' => $uploadedFile->getClientMimeType(),
+            ]);
+
+            $attachments[] = $attachment;
+        }
 
         DB::table('conversations')->where('id', $conversation->id)->update(['updated_at' => now()]);
         DB::table('conversation_participants')
@@ -201,10 +230,34 @@ class MessageController extends Controller
                 'isOwn' => true,
                 'avatar_url' => $this->getUserAvatar($request->user()),
                 'avatar' => $this->getUserAvatar($request->user()),
-                'attachments' => [],
+                'attachments' => collect($attachments)->map(function (MessageAttachment $attachment) {
+                    return [
+                        'name' => $attachment->file_name,
+                        'typeLabel' => $attachment->file_type_label ?? 'Archivo',
+                        'sizeLabel' => $this->formatFileSize($attachment->file_size_bytes),
+                        'url' => Storage::url($attachment->file_path),
+                    ];
+                })->values()->toArray(),
                 'replyTo' => null,
             ],
         ], 201);
+    }
+
+    private function formatFileSize(?int $sizeBytes): string
+    {
+        if ($sizeBytes === null) {
+            return '0 B';
+        }
+
+        if ($sizeBytes < 1024) {
+            return $sizeBytes . ' B';
+        }
+
+        if ($sizeBytes < 1024 * 1024) {
+            return number_format($sizeBytes / 1024, 1) . ' KB';
+        }
+
+        return number_format($sizeBytes / 1024 / 1024, 1) . ' MB';
     }
 
     public function markAsRead(Request $request, Conversation $conversation): JsonResponse

@@ -18,6 +18,28 @@ final class Api
 
         $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
         $path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
+        // Serve uploaded files directly when requests target /uploads/*
+        if (str_starts_with($path, '/uploads/') || str_starts_with($path, '/storage/uploads/')) {
+            $publicFile = __DIR__ . '/../public' . $path;
+            if (!is_file($publicFile)) {
+                Response::error('Not found', 404);
+            }
+
+            $extension = strtolower(pathinfo($publicFile, PATHINFO_EXTENSION));
+            $mimeType = (function_exists('mime_content_type') ? mime_content_type($publicFile) : 'application/octet-stream');
+            $filemtime = filemtime($publicFile);
+
+            header('Content-Type: ' . $mimeType);
+            header('Content-Length: ' . filesize($publicFile));
+            header('Cache-Control: no-cache, must-revalidate');
+            header('Pragma: no-cache');
+            header('Expires: 0');
+            header('Last-Modified: ' . gmdate('D, d M Y H:i:s', $filemtime) . ' GMT');
+            header('Access-Control-Allow-Origin: ' . Config::allowedFrontendOrigin());
+            header('Access-Control-Allow-Credentials: true');
+            readfile($publicFile);
+            exit;
+        }
 
         try {
             $this->route($method, $path);
@@ -1410,6 +1432,42 @@ final class Api
 
         $messageId = (int) $pdo->lastInsertId();
 
+        $uploadedFiles = $this->getUploadedFiles('attachments');
+        if (!empty($uploadedFiles)) {
+            $uploadDir = __DIR__ . '/../public/uploads/message_attachments/' . date('Y/m');
+            if (!is_dir($uploadDir) && !mkdir($uploadDir, 0777, true) && !is_dir($uploadDir)) {
+                Response::error('Unable to create upload directory', 500);
+            }
+            if (!is_writable($uploadDir)) {
+                @chmod($uploadDir, 0777);
+            }
+
+            $insertAttachment = $pdo->prepare(
+                'INSERT INTO message_attachments (message_id, file_name, file_path, file_size_bytes, file_type_label, created_at)
+                 VALUES (?, ?, ?, ?, ?, NOW())'
+            );
+
+            foreach ($uploadedFiles as $uploadedFile) {
+                $originalName = basename($uploadedFile['name']);
+                $safeName = preg_replace('/[^A-Za-z0-9._-]/', '_', $originalName) ?: 'attachment';
+                $storedName = uniqid('attach_', true) . '_' . $safeName;
+                $storedPath = $uploadDir . '/' . $storedName;
+
+                if (!move_uploaded_file($uploadedFile['tmp_name'], $storedPath)) {
+                    continue;
+                }
+
+                $relativePath = 'uploads/message_attachments/' . date('Y/m') . '/' . $storedName;
+                $insertAttachment->execute([
+                    $messageId,
+                    $originalName,
+                    $relativePath,
+                    $uploadedFile['size'],
+                    $uploadedFile['type'],
+                ]);
+            }
+        }
+
         $pdo->prepare('UPDATE conversations SET updated_at = NOW() WHERE id = ?')
             ->execute([$conversationId]);
 
@@ -2000,7 +2058,10 @@ private function fetchConversationMessages(int $conversationId, int $currentUser
         [$conversationId]
     );
 
-    return array_map(function (array $message) use ($currentUserId): array {
+    $messageIds = array_map(static fn (array $message): int => (int) ($message['id'] ?? 0), $messages);
+    $attachmentsByMessage = $this->fetchAttachmentsForMessages(array_values(array_filter($messageIds)));
+
+    return array_map(function (array $message) use ($currentUserId, $attachmentsByMessage): array {
         $senderFallback = $this->buildAvatar((string) ($message['sender_name'] ?? 'Usuario'));
         $senderAvatar = $message['sender_avatar'] ?? null;
         
@@ -2017,7 +2078,7 @@ private function fetchConversationMessages(int $conversationId, int $currentUser
             'avatar_url' => $senderAvatar ?? $this->defaultAvatarUrl(),
             'avatar_fallback' => $senderFallback,
             'avatar' => $senderAvatar ?? $this->defaultAvatarUrl(),
-            'attachments' => [],
+            'attachments' => $attachmentsByMessage[(int) ($message['id'] ?? 0)] ?? [],
             'replyTo' => !empty($message['reply_to_message_id']) ? [
                 'id' => (int) $message['reply_to_message_id'],
                 'sender' => (string) ($message['reply_sender_name'] ?? 'Usuario'),
@@ -2046,6 +2107,8 @@ private function fetchConversationMessageById(int $messageId, int $currentUserId
         return null;
     }
 
+    $attachments = $this->fetchAttachmentsForMessages([(int) $message['id']]);
+
     return [
         'id' => (int) $message['id'],
         'sender' => (string) ($message['sender_name'] ?? 'Usuario'),
@@ -2055,7 +2118,7 @@ private function fetchConversationMessageById(int $messageId, int $currentUserId
         'avatar_url' => $message['sender_avatar'] ?? $this->defaultAvatarUrl(),
         'avatar_fallback' => $this->buildAvatar((string) ($message['sender_name'] ?? 'Usuario')),
         'avatar' => $message['sender_avatar'] ?? $this->defaultAvatarUrl(),
-        'attachments' => [],
+        'attachments' => $attachments[(int) $message['id']] ?? [],
         'replyTo' => !empty($message['reply_to_message_id']) ? [
             'id' => (int) $message['reply_to_message_id'],
             'sender' => (string) ($message['reply_sender_name'] ?? 'Usuario'),
@@ -2063,14 +2126,6 @@ private function fetchConversationMessageById(int $messageId, int $currentUserId
         ] : null,
     ];
 }
-
-    private function fetchMessageById(int $messageId, int $conversationId): ?array
-    {
-        return $this->fetchOne(
-            'SELECT m.id, m.body, m.reply_to_message_id, m.sender_user_id, m.created_at FROM messages m WHERE m.id = ? AND m.conversation_id = ? LIMIT 1',
-            [$messageId, $conversationId]
-        );
-    }
 
     private function ensureMessageDeletable(array $message, int $currentUserId): void
     {
@@ -2312,6 +2367,97 @@ private function fetchConversationMessageById(int $messageId, int $currentUserId
 
         parse_str((string) file_get_contents('php://input'), $parsed);
         return is_array($parsed) ? $parsed : [];
+    }
+
+    private function getUploadedFiles(string $field): array
+    {
+        if (!isset($_FILES[$field])) {
+            return [];
+        }
+
+        $files = $_FILES[$field];
+        $names = $files['name'];
+        $errors = $files['error'];
+        $tmpNames = $files['tmp_name'];
+        $types = $files['type'];
+        $sizes = $files['size'];
+
+        if (!is_array($names)) {
+            $names = [$names];
+            $errors = [$errors];
+            $tmpNames = [$tmpNames];
+            $types = [$types];
+            $sizes = [$sizes];
+        }
+
+        $uploadedFiles = [];
+        foreach ($names as $index => $name) {
+            $error = $errors[$index] ?? UPLOAD_ERR_NO_FILE;
+            if ($error !== UPLOAD_ERR_OK) {
+                continue;
+            }
+
+            $tmpName = $tmpNames[$index] ?? '';
+            if ($tmpName === '' || !is_uploaded_file($tmpName)) {
+                continue;
+            }
+
+            $uploadedFiles[] = [
+                'name' => (string) $name,
+                'tmp_name' => (string) $tmpName,
+                'type' => (string) ($types[$index] ?? ''),
+                'size' => isset($sizes[$index]) ? (int) $sizes[$index] : 0,
+            ];
+        }
+
+        return $uploadedFiles;
+    }
+
+    private function formatFileSize(int $sizeBytes): string
+    {
+        if ($sizeBytes < 1024) {
+            return $sizeBytes . ' B';
+        }
+
+        if ($sizeBytes < 1024 * 1024) {
+            return number_format($sizeBytes / 1024, 1) . ' KB';
+        }
+
+        return number_format($sizeBytes / 1024 / 1024, 1) . ' MB';
+    }
+
+    private function fetchAttachmentsForMessages(array $messageIds): array
+    {
+        if (empty($messageIds)) {
+            return [];
+        }
+
+        $placeholders = implode(',', array_fill(0, count($messageIds), '?'));
+        $rows = $this->fetchAll(
+            "SELECT message_id, file_name, file_path, file_size_bytes, file_type_label
+             FROM message_attachments
+             WHERE message_id IN ($placeholders)
+             ORDER BY id ASC",
+            $messageIds
+        );
+
+        $attachments = [];
+        foreach ($rows as $row) {
+            $messageId = (int) ($row['message_id'] ?? 0);
+            $attachments[$messageId][] = [
+                'name' => (string) ($row['file_name'] ?? ''),
+                'typeLabel' => (string) ($row['file_type_label'] ?? 'Archivo'),
+                'sizeLabel' => $this->formatFileSize((int) ($row['file_size_bytes'] ?? 0)),
+                'url' => '/'.$this->normalizeUploadPath((string) ($row['file_path'] ?? '')),
+            ];
+        }
+
+        return $attachments;
+    }
+
+    private function normalizeUploadPath(string $path): string
+    {
+        return ltrim(str_replace('\\', '/', trim($path)), '/');
     }
 
     private function bearerToken(): ?string

@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class Message extends Model
 {
@@ -14,4 +15,9 @@ class Message extends Model
         'body',
         'reply_to_message_id',
     ];
+
+    public function attachments(): HasMany
+    {
+        return $this->hasMany(MessageAttachment::class, 'message_id');
+    }
 }
