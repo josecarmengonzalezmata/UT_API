@@ -124,14 +124,17 @@ class DocumentController extends Controller
 
         if ($request->filled('form_id')) {
             $query->where('form_id', $request->integer('form_id'));
+        } elseif ($request->filled('form_code')) {
+            $formCode = str_replace('-', '_', $request->string('form_code'));
+            $query->whereHas('form', function ($formQuery) use ($formCode) {
+                $formQuery->where('form_code', $formCode);
+            });
         }
 
         $documents = $query->orderByDesc('submitted_at')->paginate($request->integer('per_page', 20));
         $documents->setCollection($documents->getCollection()->map(fn (Document $document) => $this->formatDocument($document)));
 
-        return response()->json([
-            'data' => $documents,
-        ]);
+        return response()->json($documents);
     }
 
     public function store(Request $request): JsonResponse
