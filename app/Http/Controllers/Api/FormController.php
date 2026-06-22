@@ -68,4 +68,44 @@ class FormController extends Controller
 
         return response()->json(['data' => $form]);
     }
+
+    /**
+     * Obtener formularios activos para el usuario actual
+     */
+    public function active(Request $request): JsonResponse
+    {
+        $user = $request->user();
+        
+        // Obtener roles del usuario actual
+        $userRoles = $user->roles()->pluck('code')->toArray();
+
+        // Si el usuario no tiene roles, devolver array vacío
+        if (empty($userRoles)) {
+            return response()->json(['data' => []]);
+        }
+
+        // Obtener formularios activos que tengan reglas de acceso y estén dentro de los roles del usuario
+        $forms = Form::with(['accessRule' => function ($query) {
+            $query->with('roles');
+        }])
+        ->where('is_active', true)
+        ->whereHas('accessRule.roles', function ($query) use ($userRoles) {
+            $query->whereIn('code', $userRoles);
+        })
+        ->orderBy('due_at', 'asc')
+        ->get()
+        ->map(function ($form) {
+            return [
+                'id' => $form->id,
+                'title' => $form->title,
+                'section' => $form->section,
+                'description' => $form->description,
+                'is_active' => $form->is_active,
+                'due_at' => $form->accessRule?->due_at,
+                'access_roles' => $form->accessRule?->roles->pluck('code') ?? [],
+            ];
+        });
+
+        return response()->json(['data' => $forms]);
+    }
 }

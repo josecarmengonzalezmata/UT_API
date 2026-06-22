@@ -31,10 +31,12 @@ Route::get('/groups/{group}', [GroupController::class, 'show']);
 Route::middleware('auth:sanctum')->group(function () {
     Route::get('/dashboard/stats', [DashboardController::class, 'stats']);
 
+    // Rutas de formularios (incluyendo la nueva ruta 'active')
+    Route::get('/forms/active', [FormController::class, 'active']);
     Route::apiResource('forms', FormController::class)->only(['index', 'show', 'update']);
+    
     Route::apiResource('cycles', CycleController::class);
     Route::apiResource('users', UserController::class);
-    // Protected group mutations (create, update, delete)
     Route::apiResource('groups', GroupController::class)->except(['index','show']);
     Route::apiResource('documents', DocumentController::class);
     Route::get('/documents/{document}/file', [DocumentController::class, 'file'])->name('documents.file');
@@ -50,9 +52,9 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::delete('/conversations/{conversation}/messages/{message}', [MessageController::class, 'destroy']);
     Route::patch('/conversations/{conversation}/read', [MessageController::class, 'markAsRead']);
     
-        // Document distribution and filtering endpoints
-        Route::get('/documents-active-cycle', [DocumentController::class, 'byCycleActive']);
-        Route::get('/documents-by-docente', [DocumentController::class, 'byDocente']);
-        Route::get('/documents-pending-review', [DocumentController::class, 'pendingForReview']);
-        Route::get('/documents-status-count', [DocumentController::class, 'countByStatus']);
+    // Document distribution and filtering endpoints
+    Route::get('/documents-active-cycle', [DocumentController::class, 'byCycleActive']);
+    Route::get('/documents-by-docente', [DocumentController::class, 'byDocente']);
+    Route::get('/documents-pending-review', [DocumentController::class, 'pendingForReview']);
+    Route::get('/documents-status-count', [DocumentController::class, 'countByStatus']);
 });
